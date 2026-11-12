@@ -95,3 +95,6 @@ Readings पेजवर **Monthly readings Excel (panel-wise)**: महिन�
 - **PDF:** Drive च्या GHQ_OM_PPM_Reports मध्ये (नाव: TAG_तारीख_वेळ.pdf) जमा होतो; Not OK असलेल्या ओळी लाल. PPM पेजच्या तळाशी **Completed checklists (PDF)**: Admin / Engineer / RIL / PM / APM ला **Download PDF** (फोनच्या Downloads/GHQ-OM मध्ये) आणि Drive link दिसतो.
 - चेकलिस्ट लिंक नसेल तर PPM शीटमधील जुना **Checklist** कॉलम (एका ओळीत `;` ने पॉईंट) वापरला जातो; तोही नसेल तर फक्त Mark done.
 - नवीन परवानगी Apps Script ला लागू शकते (Drive/Sheets वाचणे) — setup Run केल्यावर Allow करा.
+
+### चेकलिस्ट वाचण्याची पद्धत (PSU फॉर्मॅट)
+अँप Sheet मधून हे वाचतो: **वरचे शीर्षक** (PDF च्या निळ्या पट्टीत), **वरील माहितीचे ब्लॉक** (PSU Tag No., Location / Area, PSU Type, PTW No, Site / Building, Date / Time — Tag, Location, Date आपोआप भरतात; बाकीचे भरणाऱ्याला विचारतात, dropdown असेल तर तेच पर्याय), **Check Point** कॉलम + **Sr.** क्रमांक, **A./B. विभाग**, Status चा dropdown (Sheet मधील पर्याय; नसेल तर OK / Not OK / NA), आणि कॉलमची नावे. PDF तशीच रचना: निळे शीर्षक, माहिती ब्लॉक, विभाग पट्ट्या, Not OK ओळ लाल. लोगो (Jio World Centre) PDF मध्ये येत नाही.
