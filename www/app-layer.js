@@ -995,24 +995,26 @@
       '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Close</button><button class="ghq-btn" onclick="GHQ.ppmDone(' + i + ')">Mark done</button></div>');
   }
   var clCtx = null;
+  function clShow(i, r) {
+    var e = ppmRows[i]; if (!e) return;
+    if (!r.items || !r.items.length) { ppmSimple(i); return; }
+    clCtx = { i: i, e: e, title: r.title || '', items: r.items, fields: r.fields || [], cols: r.cols || null, opts: (r.opts && r.opts.length >= 2) ? r.opts : ['OK', 'Not OK', 'NA'] }; clForm();
+  }
   function ppmOpen(i) {
     var e = ppmRows[i]; if (!e) return;
     var ck = 'ghq_cl_' + eqKey(e), local = (e.check || []).map(function (t) { return { t: t }; });
-    function show(title, items) {
-      if (!items.length) { ppmSimple(i); return; }
-      clCtx = { i: i, e: e, title: title || '', items: items }; clForm();
-    }
-    if (!e.hasCl || LOCAL) { show('', local); return; }
+    function show(r) { clShow(i, r); }
+    if (!e.hasCl || LOCAL) { show({ items: local }); return; }
     var cached = LS.get(ck, null);
     modal('<h3 class="ghq-h3">' + esc(e.name) + '</h3><div class="ghq-note">Loading checklist…</div>');
-    if (!navigator.onLine) { if (cached) show(cached.title, cached.items); else { toast('Open once with internet to load this checklist'); closeModal(); } return; }
+    if (!navigator.onLine) { if (cached) show(cached); else { toast('Open once with internet to load this checklist'); closeModal(); } return; }
     api('checklist_get', { name: e.name, loc: e.loc || '' }).then(function (r) {
       if (!r.ok) throw new Error(r.error || 'error');
-      if (r.items && r.items.length) { LS.set(ck, { title: r.title, items: r.items }); show(r.title, r.items); }
-      else { toast('Checklist sheet is empty — using the simple list'); show('', local); }
+      if (r.items && r.items.length) { LS.set(ck, r); show(r); }
+      else { toast('Checklist sheet is empty — using the simple list'); show({ items: local }); }
     }).catch(function (err) {
-      if (cached) show(cached.title, cached.items);
-      else { toast('Could not load the checklist: ' + (err && err.message || err)); show('', local); }
+      if (cached) show(cached);
+      else { toast('Could not load the checklist: ' + (err && err.message || err)); show({ items: local }); }
     });
   }
   function clForm() {
@@ -1020,11 +1022,15 @@
     var h = '<h3 class="ghq-h3">' + esc(e.name) + (e.tag ? ' <span style="color:var(--cyan)">[' + esc(e.tag) + ']</span>' : '') + '</h3>' +
       '<div class="ghq-note">' + esc(e.loc || '') + (c.title ? ' · ' + esc(c.title) : '') + '<br>Last done: ' + (lastDone(e) ? fmtDate(lastDone(e), '—') : '—') + ' · Next due: ' + fmtDate(ymdOf(nextDue(e)), '—') + '</div>' +
       '<button class="ghq-btn ghost" onclick="GHQ.clAllOk()">Mark all points OK</button>';
+    (c.fields || []).forEach(function (f, k) {
+      if (clAuto(f.l, e) !== null) return;                  // tag / location / date are filled automatically
+      h += '<label class="ghq-lbl">' + esc(f.l) + '</label>' + (f.opts ? '<select class="cal-select cl-f" data-k="' + k + '" style="width:100%"><option value="">— select —</option>' + f.opts.map(function (o) { return '<option>' + esc(o) + '</option>'; }).join('') + '</select>' : '<input class="ghq-input cl-f" data-k="' + k + '">');
+    });
     c.items.forEach(function (x, k) {
       if (x.h) { h += '<div class="sub-section-header" style="margin-top:8px">' + esc(x.h) + '</div>'; return; }
       n++;
-      h += '<div class="cl-item" data-k="' + k + '" style="border-bottom:1px dashed rgba(212,175,55,.2);padding:8px 0"><div style="font-size:.82rem;color:#e2e8f0;margin-bottom:6px">' + n + '. ' + esc(x.t) + '</div>' +
-        '<div style="display:flex;gap:6px;margin-bottom:6px">' + [['OK', 'OK'], ['NOTOK', 'Not OK'], ['NA', 'NA']].map(function (b) { return '<button type="button" class="cl-b" data-s="' + b[0] + '" onclick="GHQ.clSet(this)">' + b[1] + '</button>'; }).join('') + '</div>' +
+      h += '<div class="cl-item" data-k="' + k + '" style="border-bottom:1px dashed rgba(212,175,55,.2);padding:8px 0"><div style="font-size:.82rem;color:#e2e8f0;margin-bottom:6px">' + esc(x.sr || n) + '. ' + esc(x.t) + '</div>' +
+        '<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">' + c.opts.map(function (o) { return '<button type="button" class="cl-b" data-c="' + optKind(o) + '" data-s="' + esc(o) + '" onclick="GHQ.clSet(this)">' + esc(o) + '</button>'; }).join('') + '</div>' +
         '<div class="ghq-grid2"><input class="ghq-input cl-v" placeholder="Reading / value"><input class="ghq-input cl-r" placeholder="Remarks"></div></div>';
     });
     h += '<label class="ghq-lbl" style="margin-top:8px">Done on</label><input id="cl-date" type="date" class="ghq-input" value="' + ymdOf(new Date()) + '" max="' + ymdOf(new Date()) + '">' +
@@ -1032,12 +1038,21 @@
       '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Close</button><button class="ghq-btn" onclick="GHQ.clSubmit()">Submit &amp; create PDF</button></div>';
     modal(h);
   }
+  function optKind(o) { return /not\s*ok|nok|fail|defect|abnormal/i.test(o) ? 'bad' : /^(n\/?a|not applicable)$/i.test(o) ? 'na' : 'ok'; }
+  function clAuto(label, e) {                           // value for header labels we can fill ourselves, else null
+    var l = String(label).toLowerCase();
+    if (/tag/.test(l)) return e.tag || '';
+    if (/location|area/.test(l)) return e.loc || '';
+    if (/date|time/.test(l)) return '@date';
+    if (/equipment|asset/.test(l)) return e.name || '';
+    return null;
+  }
   function clSet(btn) {
     var row = btn.parentNode; Array.prototype.forEach.call(row.children, function (b) { b.classList.remove('on'); });
     btn.classList.add('on'); row.parentNode.style.background = '';
   }
   function clAllOk() {
-    document.querySelectorAll('.cl-item').forEach(function (it) { if (!it.querySelector('.cl-b.on')) clSet(it.querySelector('.cl-b[data-s="OK"]')); });
+    document.querySelectorAll('.cl-item').forEach(function (it) { if (!it.querySelector('.cl-b.on')) { var okb = it.querySelector('.cl-b[data-c="ok"]'); if (okb) clSet(okb); } });
   }
   function clSubmit() {
     var c = clCtx; if (!c) return;
@@ -1045,13 +1060,20 @@
     document.querySelectorAll('.cl-item').forEach(function (it) {
       var k = +it.getAttribute('data-k'), on = it.querySelector('.cl-b.on');
       if (!on) { missing++; it.style.background = 'rgba(248,113,113,.12)'; if (!firstMissing) firstMissing = it; return; }
-      out[k] = { t: c.items[k].t, s: on.getAttribute('data-s'), v: it.querySelector('.cl-v').value.trim(), r: it.querySelector('.cl-r').value.trim() };
+      out[k] = { t: c.items[k].t, sr: c.items[k].sr || '', s: on.getAttribute('data-s'), v: it.querySelector('.cl-v').value.trim(), r: it.querySelector('.cl-r').value.trim() };
     });
     if (missing) { toast('Select OK / Not OK / NA for ' + missing + ' more point' + (missing > 1 ? 's' : '')); if (firstMissing) firstMissing.scrollIntoView({ block: 'center' }); return; }
     var date = $('cl-date').value;
     if (!date) { toast('Select the date'); return; }
     if (date > ymdOf(new Date())) { toast('Date cannot be in the future'); return; }
-    var d = { key: eqKey(c.e), eq: c.e.name, tag: c.e.tag || '', loc: c.e.loc || '', title: c.title, date: date, note: $('cl-note').value.trim(), items: out };
+    var nowT = new Date(), flds = (c.fields || []).map(function (f, k) {
+      var a = clAuto(f.l, c.e), v;
+      if (a === '@date') v = date + ' ' + p2(nowT.getHours()) + ':' + p2(nowT.getMinutes());
+      else if (a !== null) v = a;
+      else { var inp = document.querySelector('.cl-f[data-k="' + k + '"]'); v = inp ? inp.value.trim() : ''; }
+      return { l: f.l, v: v };
+    });
+    var d = { key: eqKey(c.e), eq: c.e.name, tag: c.e.tag || '', loc: c.e.loc || '', title: c.title, cols: c.cols || null, fields: flds, date: date, note: $('cl-note').value.trim(), items: out };
     if (JSON.stringify(d).length > 40000) { toast('Checklist is too long to save'); return; }
     commit('ppm.checklist', d).then(function () { closeModal(); clCtx = null; toast('✔ Checklist saved — PDF will be created in Drive'); });
   }
@@ -1315,7 +1337,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
