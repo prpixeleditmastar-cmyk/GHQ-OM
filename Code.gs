@@ -361,7 +361,7 @@ function addFlat_(flat, ts, who, type, d, id, restore) {
       flat.Roster.push(row);
     });
   } else if (type === 'ppm.checklist') {
-    const bad = (d.items || []).filter(function (x) { return x.s === 'NOTOK'; }).length;
+    const bad = (d.items || []).filter(function (x) { return /not\s*ok|nok|fail|defect|abnormal/i.test(String(x.s || '')); }).length;
     flat['PPM Log'].push([t, who, d.eq, d.date, d.note || '', d.tag || '', bad, '', '', id || '']);
   } else if (type === 'ppm.done') {
     flat['PPM Log'].push([t, who, d.eq, d.date, d.note || '', d.tag || '', '', '', '', id || '']);
@@ -626,6 +626,7 @@ function dstr_(v) {
   if (d2) return d2[3] + '-' + ('0' + Number(d2[2])).slice(-2) + '-' + ('0' + Number(d2[1])).slice(-2);
   return '';
 }
+function clLink_(r) { return sheetIdFromLink_(r[9]) ? String(r[9]) : (sheetIdFromLink_(r[6]) ? String(r[6]) : ''); }   // link may be in 'Checklist Sheet' (J) or was pasted in 'Checklist' (G)
 function ppmCat_(v) { const t = String(v || '').trim().toLowerCase(); return t.indexOf('e') === 0 ? 'elec' : t.indexOf('h') === 0 ? 'hvac' : t.indexOf('p') === 0 ? 'plumb' : ''; }
 function ppmList_() {
   const sh = sheet_('PPM');
@@ -636,8 +637,8 @@ function ppmList_() {
     const cat = ppmCat_(r[0]), name = String(r[1]).trim();
     const flag = String(r[7]).trim().toLowerCase();
     if (!cat || !name || flag === 'no' || flag === 'n' || flag === 'inactive') return;
-    out.push({ cat: cat, name: name, loc: String(r[2]).trim(), freq: String(r[3]).trim() || 'Monthly', last: dstr_(r[4]), team: String(r[5]).trim(), tag: String(r[8] || '').trim(), hasCl: !!sheetIdFromLink_(r[9]),
-               check: String(r[6]).split(/[\n;]+/).map(function (x) { return x.trim(); }).filter(Boolean) });
+    out.push({ cat: cat, name: name, loc: String(r[2]).trim(), freq: String(r[3]).trim() || 'Monthly', last: dstr_(r[4]), team: String(r[5]).trim(), tag: String(r[8] || '').trim(), hasCl: !!clLink_(r),
+               check: (sheetIdFromLink_(r[6]) ? '' : String(r[6])).split(/[\n;]+/).map(function (x) { return x.trim(); }).filter(Boolean) });
   });
   return out;
 }
@@ -681,27 +682,52 @@ function rosterPdf_(req) {
 
 
 /* ================= PPM checklists: each equipment has its own Google Sheet (link in PPM sheet, column "Checklist Sheet") ================= */
-/* vals = 2-D array of the checklist sheet -> {title, items:[{h:'Section'} | {t:'point text'}]} */
-function parseChecklist_(vals) {
+/* vals = 2-D array of the checklist sheet (display values); valids = same shape, each cell = array of dropdown options or null.
+ * -> {title, fields:[{l, opts}], cols:{sr,pt,st,rm}, opts:[status options], items:[{h} | {t, sr}]}   (layout like the user's PSU sheet:
+ *    title row, a block of label cells (Tag No., Location, PTW No ...), table header "Sr. | Check Point | Status / Reading | Remarks", section bands, numbered points) */
+function parseChecklist_(vals, valids) {
   const rx = /(description|check\s*point|checkpoint|particular|activity|inspection|task|parameter|work to be done|^items?$)/i;
   const rows = vals.map(function (r) { return r.map(function (c) { return String(c == null ? '' : c).trim(); }); });
+  const V = function (r, c) { return valids && valids[r] && valids[r][c] ? valids[r][c] : null; };
   let hr = -1, ic = -1;
-  for (let r = 0; r < Math.min(rows.length, 20) && hr < 0; r++)
+  for (let r = 0; r < Math.min(rows.length, 25) && hr < 0; r++)
     for (let c = 0; c < rows[r].length; c++) if (rows[r][c] && rows[r][c].length < 40 && rx.test(rows[r][c])) { hr = r; ic = c; break; }
   if (hr < 0) {                                           // no header: the column with the most text is the list; row 1 is taken as header
     let best = 0;
     const width = rows.reduce(function (m, r) { return Math.max(m, r.length); }, 0);
     for (let c = 0; c < width; c++) { let n = 0; rows.forEach(function (r) { if (r[c] && r[c].length > 3 && isNaN(Number(r[c]))) n++; }); if (n > best) { best = n; ic = c; } }
-    if (ic < 0) return { title: '', items: [] };
+    if (ic < 0) return { title: '', fields: [], cols: {}, opts: null, items: [] };
     hr = 0;
   }
-  let sc = -1;
-  rows[hr].forEach(function (x, c) { if (sc < 0 && c !== ic && /^(sr|s\.?\s*no|sl|no\b|#)/i.test(x)) sc = c; });
-  const title = rows.slice(0, hr).map(function (r) { return r.filter(Boolean).join(' '); }).filter(Boolean).join(' · ').slice(0, 150);
-  const items = [];
+  let sc = -1, stc = -1, rmc = -1;
+  rows[hr].forEach(function (x, c) {
+    if (sc < 0 && c !== ic && /^(sr|s\.?\s*no|sl|no\b|#)/i.test(x)) sc = c;
+    if (stc < 0 && c !== ic && /status|reading|result|observation|condition/i.test(x)) stc = c;
+    if (rmc < 0 && c !== ic && /remark/i.test(x)) rmc = c;
+  });
+  const cols = { sr: sc >= 0 ? rows[hr][sc] : 'Sr.', pt: rows[hr][ic] || 'Check Point', st: stc >= 0 ? rows[hr][stc] : 'Status / Reading', rm: rmc >= 0 ? rows[hr][rmc] : 'Remarks' };
+
+  // title = first non-empty cell above the table; label cells (Tag No., Location ...) = the other text cells above the table
+  let title = '', tr = -1;
+  for (let r = 0; r < hr && tr < 0; r++) { const f = rows[r].filter(Boolean); if (f.length) { title = f[0]; tr = r; } }
+  const fields = [];
+  for (let r = tr + 1; r < hr; r++) {
+    let prevLabel = false;
+    for (let c = 0; c < rows[r].length; c++) {
+      const x = rows[r][c];
+      if (!x) { prevLabel = false; continue; }
+      if (prevLabel) { prevLabel = false; continue; }      // text right next to a label = pre-filled value, ignore
+      let opts = null;
+      for (let k = c + 1; k < rows[r].length && !rows[r][k] && !opts; k++) opts = V(r, k);
+      fields.push({ l: x.replace(/[:：]\s*$/, ''), opts: opts && opts.length >= 2 && opts.length <= 12 ? opts : null });
+      prevLabel = true;
+    }
+  }
+
+  const items = []; let stOpts = null;
   for (let r = hr + 1; r < rows.length; r++) {
     const t = rows[r][ic];
-    if (!t) {                                                // section title written in the Sr column (e.g. "A. VISUAL")
+    if (!t) {                                              // section title written in the Sr column (e.g. "A. Safety & Pre-work")
       const s0 = sc >= 0 ? rows[r][sc] : '';
       if (s0 && isNaN(Number(s0)) && s0.length < 90 && !rows[r].some(function (x, c) { return c !== sc && x; })) items.push({ h: s0 });
       continue;
@@ -710,9 +736,12 @@ function parseChecklist_(vals) {
     const sr = sc >= 0 ? rows[r][sc] : '';
     const others = rows[r].some(function (x, c) { return c !== ic && c !== sc && x; });
     if (sc >= 0 && !sr && !others && t.length < 90) items.push({ h: t });
-    else items.push({ t: t });
+    else {
+      items.push({ t: t, sr: sr });
+      if (!stOpts && stc >= 0) { const o = V(r, stc); if (o && o.length >= 2 && o.length <= 8) stOpts = o; }
+    }
   }
-  return { title: title, items: items };
+  return { title: title, fields: fields, cols: cols, opts: stOpts, items: items };
 }
 function findPpmRow_(name, loc) {
   const sh = sheet_('PPM');
@@ -726,7 +755,7 @@ function findPpmRow_(name, loc) {
 function checklistGet_(req) {
   const row = findPpmRow_(req.name, req.loc);
   if (!row) return { ok: false, error: 'Equipment not found in the PPM sheet' };
-  const link = String(row[9] || '');
+  const link = clLink_(row);
   const id = sheetIdFromLink_(link);
   if (!id) return { ok: true, items: [], none: true };
   const ss = SpreadsheetApp.openById(id);
@@ -734,27 +763,51 @@ function checklistGet_(req) {
   let sh = null;
   if (g) ss.getSheets().forEach(function (x) { if (String(x.getSheetId()) === g[1]) sh = x; });
   if (!sh) sh = ss.getSheets()[0];
-  const res = parseChecklist_(sh.getDataRange().getDisplayValues());
-  return { ok: true, title: res.title || ss.getName(), items: res.items };
+  const rng = sh.getDataRange();
+  let valids = null;
+  try {
+    valids = rng.getDataValidations().map(function (row) {
+      return row.map(function (v) {
+        if (!v) return null;
+        try { if (v.getCriteriaType() === SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) return v.getCriteriaValues()[0].map(String); } catch (e) {}
+        return null;
+      });
+    });
+  } catch (e) { valids = null; }
+  const res = parseChecklist_(rng.getDisplayValues(), valids);
+  return { ok: true, title: res.title || ss.getName(), fields: res.fields, cols: res.cols, opts: res.opts, items: res.items };
 }
 function esc_(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
 function checklistHtml_(d, who, ts) {
-  const SM = { OK: 'OK', NOTOK: 'NOT OK', NA: 'NA' };
+  const BLUE = '#1f3a7a', BAND = '#bcd3f0', cols = d.cols || {};
   let n = 0, bad = 0;
+  const isBad = function (st) { return /not\s*ok|nok|fail|defect|abnormal/i.test(String(st || '')); };
   const body = (d.items || []).map(function (x) {
-    if (x.h) return '<tr><td colspan="5" style="background:#f3e5ab;font-weight:bold">' + esc_(x.h) + '</td></tr>';
+    if (x.h) return '<tr><td colspan="4" bgcolor="' + BAND + '"><b>' + esc_(x.h) + '</b></td></tr>';
     n++;
-    const nb = x.s === 'NOTOK'; if (nb) bad++;
-    return '<tr' + (nb ? ' style="background:#fde2e2"' : '') + '><td>' + n + '</td><td>' + esc_(x.t) + '</td><td style="text-align:center;font-weight:bold">' + esc_(SM[x.s] || '') + '</td><td>' + esc_(x.v) + '</td><td>' + esc_(x.r) + '</td></tr>';
+    const nb = isBad(x.s); if (nb) bad++;
+    const stv = esc_(x.s || '') + (x.v ? (x.s ? ' / ' : '') + esc_(x.v) : '');
+    return '<tr' + (nb ? ' bgcolor="#fde2e2"' : '') + '><td align="center">' + esc_(x.sr || n) + '</td><td>' + esc_(x.t) + '</td><td align="center"><b>' + stv + '</b></td><td>' + esc_(x.r) + '</td></tr>';
   }).join('');
-  return '<html><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;font-size:11px}h2{margin:0 0 4px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #888;padding:4px;vertical-align:top}th{background:#222;color:#fff}.m td{border:0;padding:2px 4px}</style></head><body>' +
-    '<h2>GHQ Engineering — PPM Checklist</h2>' +
-    '<table class="m"><tr><td><b>Equipment:</b> ' + esc_(d.eq) + '</td><td><b>Tag:</b> ' + esc_(d.tag) + '</td></tr>' +
-    '<tr><td><b>Location:</b> ' + esc_(d.loc) + '</td><td><b>Checklist:</b> ' + esc_(d.title) + '</td></tr>' +
-    '<tr><td><b>Date:</b> ' + esc_(d.date) + '</td><td><b>Done by:</b> ' + esc_(who) + ' &nbsp; <b>Submitted:</b> ' + esc_(Utilities.formatDate(new Date(ts), TZ, 'dd-MMM-yyyy HH:mm')) + '</td></tr></table><br>' +
-    '<table><tr><th style="width:5%">Sr</th><th>Check point</th><th style="width:11%">Status</th><th style="width:14%">Reading</th><th style="width:22%">Remarks</th></tr>' + body + '</table><br>' +
+  const when = Utilities.formatDate(new Date(ts), TZ, 'dd-MMM-yyyy HH:mm');
+  let info = '';
+  const f = d.fields || [];
+  if (f.length) {
+    for (let i = 0; i < f.length; i += 2) {
+      const a = f[i], b = f[i + 1];
+      info += '<tr><td width="20%" bgcolor="#e8eefb"><b>' + esc_(a.l) + '</b></td><td width="30%">' + esc_(a.v) + '</td>' +
+        (b ? '<td width="20%" bgcolor="#e8eefb"><b>' + esc_(b.l) + '</b></td><td width="30%">' + esc_(b.v) + '</td>' : '<td></td><td></td>') + '</tr>';
+    }
+  } else {
+    info = '<tr><td width="20%" bgcolor="#e8eefb"><b>Equipment</b></td><td width="30%">' + esc_(d.eq) + '</td><td width="20%" bgcolor="#e8eefb"><b>Tag</b></td><td width="30%">' + esc_(d.tag) + '</td></tr>' +
+      '<tr><td bgcolor="#e8eefb"><b>Location</b></td><td>' + esc_(d.loc) + '</td><td bgcolor="#e8eefb"><b>Date / Time</b></td><td>' + esc_(d.date) + '</td></tr>';
+  }
+  return '<html><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;font-size:10.5px}table{border-collapse:collapse;width:100%}td,th{border:1px solid #666;padding:4px;vertical-align:top}</style></head><body>' +
+    '<table><tr><td bgcolor="' + BLUE + '" style="color:#f5c542;font-size:15px;padding:10px"><b>' + esc_(d.title || 'PPM Checklist') + '</b></td></tr></table>' +
+    '<table>' + info + '</table>' +
+    '<table><tr><th bgcolor="' + BLUE + '" style="color:#fff" width="7%">' + esc_(cols.sr || 'Sr.') + '</th><th bgcolor="' + BLUE + '" style="color:#fff">' + esc_(cols.pt || 'Check Point') + '</th><th bgcolor="' + BLUE + '" style="color:#fff" width="20%">' + esc_(cols.st || 'Status / Reading') + '</th><th bgcolor="' + BLUE + '" style="color:#fff" width="24%">' + esc_(cols.rm || 'Remarks') + '</th></tr>' + body + '</table><br>' +
     '<b>Result:</b> ' + (bad ? bad + ' point(s) NOT OK' : 'All points OK') + (d.note ? '<br><b>Remarks:</b> ' + esc_(d.note) : '') +
-    '<br><br><br><table class="m"><tr><td>Done by: ' + esc_(who) + '</td><td>Supervisor / Engineer sign: ____________________</td></tr></table></body></html>';
+    '<br><br><table><tr><td width="50%"><b>Done by:</b> ' + esc_(who) + '<br><b>Submitted:</b> ' + esc_(when) + '</td><td width="50%"><b>Checked by (Supervisor / Engineer):</b><br><br>Sign: ____________________</td></tr></table></body></html>';
 }
 function makeChecklistPdf_(d, who, ts) {
   const name = String(d.tag || d.eq).replace(/[^\w\-]+/g, '_') + '_' + String(d.date) + '_' + Utilities.formatDate(new Date(ts), TZ, 'HHmm') + '.pdf';
