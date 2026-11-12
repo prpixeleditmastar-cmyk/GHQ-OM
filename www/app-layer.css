@@ -1,0 +1,32 @@
+/* Login, sync pill, admin & entries screens — matches the Golden theme */
+.ghq-login{position:fixed;inset:0;z-index:300;background:#060911;display:flex;align-items:center;justify-content:center;padding:20px}
+.ghq-login-card{width:100%;max-width:380px;background:#0d1424;border:1px solid var(--border-gold);border-radius:16px;padding:26px 22px;display:flex;flex-direction:column;gap:14px;box-shadow:0 8px 30px rgba(0,0,0,.6)}
+.ghq-login-card h1{font-size:1.25rem;background:var(--gold-gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.ghq-login-card p{font-size:.78rem;color:var(--text-muted)}
+.ghq-input{width:100%;padding:11px 12px;border-radius:8px;border:1px solid var(--border-gold);background:#0b0f19;color:#fff;font-size:.95rem;font-weight:600;outline:none}
+.ghq-lbl{font-size:.72rem;color:var(--text-muted);font-weight:600;display:block;margin-bottom:3px}
+.ghq-btn{border:none;background:var(--gold-gradient);color:#0b0f19;padding:11px 14px;border-radius:8px;font-weight:800;font-size:.85rem;cursor:pointer}
+.ghq-btn.ghost{background:transparent;border:1px solid var(--gold-primary);color:var(--gold-light)}
+.ghq-btn.danger{background:linear-gradient(135deg,#ef4444,#b91c1c);color:#fff}
+.ghq-btn:disabled{opacity:.55}
+.ghq-err{color:#fca5a5;font-size:.78rem;min-height:1em}
+.ghq-pill{display:inline-flex;align-items:center;gap:5px;font-weight:700;cursor:pointer}
+.ghq-pill.ok{color:#34d399}.ghq-pill.wait{color:#fbbf24}.ghq-pill.off{color:#f87171}
+.ghq-toast{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);background:#0d1424;border:1px solid var(--gold-primary);color:var(--gold-light);padding:10px 16px;border-radius:10px;font-size:.82rem;font-weight:700;z-index:400;box-shadow:0 4px 18px rgba(0,0,0,.6);max-width:90vw;text-align:center}
+.ghq-photo-box{display:flex;flex-direction:column;gap:6px;margin:4px 0}
+.ghq-photo-box img{max-width:100%;max-height:160px;border-radius:8px;border:1px solid var(--border-gold);object-fit:cover}
+.ghq-photo-box input[type=file]{font-size:.75rem;color:var(--text-muted)}
+.ghq-row{background:var(--card-bg);border:1px solid var(--border-gold);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:3px}
+.ghq-row b{color:var(--gold-light);font-size:.82rem}
+.ghq-row span{font-size:.72rem;color:var(--text-muted)}
+.ghq-row .pend{color:#fbbf24;font-weight:700}
+.ghq-grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.ghq-note{font-size:.72rem;color:var(--text-muted);line-height:1.45}
+.ghq-hold-photo{width:100%;border-radius:8px;border:1px solid var(--border-gold);margin-top:6px}
+.ghq-logo{display:block;margin:0 auto 2px;width:68%;max-width:240px;height:auto}
+.ghq-login-card{padding-top:20px}
+
+.ghq-ov{position:fixed;inset:0;z-index:350;background:rgba(0,0,0,.7);display:flex;align-items:flex-end;justify-content:center;padding:0}
+.ghq-ov-card{width:100%;max-width:480px;max-height:92vh;overflow:auto;background:#0d1424;border:1px solid var(--border-gold);border-radius:16px 16px 0 0;padding:16px 16px 22px;display:flex;flex-direction:column;gap:6px}
+.ghq-h3{font-size:1rem;color:var(--gold-light);margin-bottom:2px}
+.ghq-upd{position:fixed;top:0;left:0;right:0;z-index:500;background:linear-gradient(135deg,#d4af37,#b8860b);color:#0b0f19;font-weight:800;font-size:.85rem;text-align:center;padding:10px;cursor:pointer}
