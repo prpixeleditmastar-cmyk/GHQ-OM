@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v5 · build ' + BUILD;
+  var VERSION = 'v5.4 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -1008,7 +1008,7 @@
     var cached = LS.get(ck, null);
     modal('<h3 class="ghq-h3">' + esc(e.name) + '</h3><div class="ghq-note">Loading checklist…</div>');
     if (!navigator.onLine) { if (cached) show(cached); else { toast('Open once with internet to load this checklist'); closeModal(); } return; }
-    api('checklist_get', { name: e.name, loc: e.loc || '' }).then(function (r) {
+    api('checklist_get', { eq: e.name, loc: e.loc || '' }).then(function (r) {
       if (!r.ok) throw new Error(r.error || 'error');
       if (r.items && r.items.length) { LS.set(ck, r); show(r); }
       else { toast('Checklist sheet is empty — using the simple list'); show({ items: local }); }
