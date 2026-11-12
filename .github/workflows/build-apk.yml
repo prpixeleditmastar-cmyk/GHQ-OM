@@ -1,0 +1,103 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create config.js from secret API_URL (optional)
+        env:
+          API_URL: ${{ secrets.API_URL }}
+        run: |
+          if [ -n "$API_URL" ]; then
+            printf 'window.GHQ_CONFIG = { API_URL: "%s", KEEP_DEMO_TICKETS: false };\n' "$API_URL" > www/config.js
+            echo "config.js created from the API_URL secret"
+          fi
+
+      - name: Check server URL in config.js
+        run: |
+          if [ ! -f www/config.js ]; then echo "ERROR: no server URL. Add the secret API_URL (or create www/config.js from config.example.js)."; exit 1; fi
+          if grep -q "PASTE_WEB_APP_URL_HERE" www/config.js; then echo "ERROR: www/config.js still has the placeholder. Paste your Apps Script Web app URL."; exit 1; fi
+          echo "config.js OK"
+
+      - name: Build id and update address
+        run: |
+          echo "BUILD_ID=$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_ENV"
+          OWNER=$(echo "${GITHUB_REPOSITORY_OWNER}" | tr 'A-Z' 'a-z')
+          REPO="${GITHUB_REPOSITORY#*/}"
+          echo "UPDATE_URL=https://${OWNER}.github.io/${REPO}/" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install & prepare web files
+        run: |
+          npm install
+          npm run prepare-web
+
+      - name: Create Android project
+        run: |
+          npx cap add android
+          npx cap sync android
+          MF=android/app/src/main/AndroidManifest.xml
+          # camera (ticket photos) + saving files to Downloads on Android 9 and older
+          sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />\n    <application#' "$MF"
+
+      - name: Apply app icon and splash screen
+        run: |
+          cp -r resources/android-res/* android/app/src/main/res/
+          printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#000000</color>\n</resources>\n' > android/app/src/main/res/values/ic_launcher_background.xml
+          find android/app/src/main/res -name 'splash.png' -exec cp resources/splash.png {} \;
+
+      - name: Add native file saver (saves downloads to phone Downloads/GHQ-OM)
+        run: |
+          D=android/app/src/main/java/com/elev8pixel/ghqom
+          ls "$D"
+          cp android-src/FileSaverPlugin.java "$D/FileSaverPlugin.java"
+          cp android-src/MainActivity.java "$D/MainActivity.java"
+
+      - name: Build APK
+        working-directory: android
+        run: |
+          D=app/src/main/java/com/elev8pixel/ghqom
+          ./gradlew assembleDebug || {
+            echo "::warning::Native file saver did not compile - building without it (downloads will use the Share sheet)"
+            rm -f "$D/FileSaverPlugin.java"
+            cp ../android-src/MainActivity.default.java "$D/MainActivity.java"
+            ./gradlew assembleDebug
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GHQ-OM-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      # ---- automatic app updates: publish the new app files to GitHub Pages (needs Settings > Pages > Source = GitHub Actions) ----
+      - uses: actions/upload-pages-artifact@v3
+        continue-on-error: true
+        with:
+          path: dist-update
+
+      - name: Publish update (GitHub Pages)
+        id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
