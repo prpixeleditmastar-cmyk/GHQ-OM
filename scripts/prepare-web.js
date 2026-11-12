@@ -48,7 +48,7 @@ fs.writeFileSync(path.join(out, 'index.html'), `<!doctype html><html><head><meta
 function inl(s) { return s.replace(/<\/script/gi, '<\\/script'); }
 let b = html;
 b = b.replace('<link href="app-layer.css" rel="stylesheet">', () => '<style>' + fs.readFileSync(path.join(src, 'app-layer.css'), 'utf8') + '</style>');
-['xlsx-lite.js', 'app-layer.js'].forEach(f => {
+['xlsx-lite.js', 'xlsx-read.js', 'app-layer.js'].forEach(f => {
   const tag = '<script src="' + f + '"></script>';
   if (!b.includes(tag)) throw new Error(f + ' tag not found');
   b = b.replace(tag, () => '<script>' + inl(fs.readFileSync(path.join(src, f), 'utf8')) + '</script>');
