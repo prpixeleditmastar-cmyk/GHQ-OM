@@ -22,6 +22,8 @@ const SHEETS = {
   Tickets:  ['Time', 'User', 'Action', 'Ticket ID', 'Title', 'Dept', 'Priority', 'Location', 'Tag', 'Technician', 'Details', 'Photo'],
   AMC:      ['Time', 'User', 'Action', 'AMC ID', 'Vendor', 'System', 'Start', 'End', 'Extra'],
   Feeders:  ['Type', 'Panel', 'Feeder', 'Active', 'Sheet Tab', 'Sheet Heading'],   // master list of meters shown in the app's Readings page (E/F optional: only if names differ from the main sheet)
+  Roster:   ['Month', 'Name'].concat(Array.apply(null, Array(31)).map(function (x, i) { return String(i + 1); }), ['Uploaded by', 'Uploaded at']),
+  Shifts:   ['Code', 'Name', 'Timing'],
   PPM:      ['Category', 'Equipment', 'Location', 'Frequency', 'Last done', 'Team / Vendor', 'Checklist', 'Active'],
   'PPM Log': ['Time', 'User', 'Equipment', 'Done date', 'Note'],
   MainSheets: ['Month', 'Sheet link', 'Note']          // which MAIN workbook (per month) receives the readings
@@ -59,6 +61,11 @@ function setup() {
   pp.getRange('H2:H1000').setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(['Yes', 'No'], true).setAllowInvalid(true).build());
   pp.getRange('E2:E1000').setNumberFormat('yyyy-mm-dd');
   pp.setColumnWidths(1, 1, 90); pp.setColumnWidths(2, 2, 240); pp.setColumnWidths(4, 3, 120); pp.setColumnWidths(7, 1, 420);
+
+  const shf = ss.getSheetByName('Shifts');
+  if (shf.getLastRow() < 2) shf.getRange(2, 1, 6, 3).setValues([['A', 'Shift A', ''], ['A1', 'Shift A1', ''], ['B', 'Shift B', ''], ['C', 'Shift C', ''], ['G', 'General', ''], ['WO', 'Week off', '']]);
+  shf.setColumnWidths(1, 1, 70); shf.setColumnWidths(2, 2, 160);
+  ss.getSheetByName('Roster').getRange('A:A').setNumberFormat('@');
 
   const ms = ss.getSheetByName('MainSheets');
   ms.getRange('A:A').setNumberFormat('@');              // month as text: 2026-12
@@ -129,6 +136,8 @@ function route_(req) {
     case 'user_save':   requireAdmin_(user); return saveUser_(req.u);
     case 'user_delete': requireAdmin_(user); return deleteUser_(user, req.target);
     case 'feeder_add':  requireAdmin_(user); return addFeeders_(req);
+    case 'shifts_list': return { ok: true, shifts: shiftsList_() };
+    case 'roster_pdf':  requireAdmin_(user); return rosterPdf_(req);
     case 'ppm_list':    return { ok: true, equipment: ppmList_() };
     case 'ppm_add':     if (!canHold_(user)) throw new Error('Only Supervisor / Engineer / Admin can add equipment'); return ppmAdd_(req);
     case 'prev_reading': return prevReading_(req);
@@ -250,7 +259,7 @@ function push_(user, req) {
     if (last > 1) sh.getRange(2, 2, last - 1, 1).getValues().forEach(function (r) { known[r[0]] = 1; });
 
     const restore = !!req.restore && user.role === 'admin';
-    const rows = [], flat = { Readings: [], Tickets: [], AMC: [], 'PPM Log': [] };
+    const rows = [], flat = { Readings: [], Tickets: [], AMC: [], 'PPM Log': [], Roster: [] };
     let seq = last;                                      // row r has seq r-1; next row = last+1
 
     (req.events || []).forEach(function (ev) {
@@ -258,6 +267,7 @@ function push_(user, req) {
       if (known[ev.id]) { accepted.push(ev.id); return; }
       const type = String(ev.type || '');
       if (/^amc\./.test(type) && user.role !== 'admin' && !isSup_(user)) return;   // not accepted
+      if (/^roster\./.test(type) && user.role !== 'admin' && !(req.restore && user.role === 'admin')) return;   // admin only
       if (type === 'ticket.hold' && !canHold_(user) && !(req.restore && user.role === 'admin')) return;   // only Supervisor / Engineer / Admin
       const who = restore ? (ev.user || user.name) : user.name;
       // keep the time the entry was made on the phone (may have been offline); ignore bad / future clocks
@@ -328,6 +338,13 @@ function addFlat_(flat, ts, who, type, d, id, restore) {
     flat.Tickets.push([t, who, 'hold', d.id, '', '', '', '', '', '', 'Until ' + d.until + ' — ' + (d.reason || ''), '']);
   } else if (type === 'amc.create' && d.amc) {
     flat.AMC.push([t, who, 'created', d.amc.id, d.amc.vendor, d.amc.system, d.amc.start, d.amc.end, d.amc.scope || '']);
+  } else if (type === 'roster.set') {
+    (d.people || []).forEach(function (pp) {
+      const row = [String(d.month), pp.n];
+      for (let i = 0; i < 31; i++) row.push((pp.c && pp.c[i]) || '');
+      row.push(who, t);
+      flat.Roster.push(row);
+    });
   } else if (type === 'ppm.done') {
     flat['PPM Log'].push([t, who, d.eq, d.date, d.note || '']);
   } else if (type === 'amc.renew') {
@@ -623,4 +640,23 @@ function ppmAdd_(req) {
     sh.getRange(row, 1, 1, 8).setValues([[cat, name, String(e.loc || '').trim(), freq, dstr_(e.last), String(e.team || '').trim(), String(e.check || '').trim(), 'Yes']]);
   } finally { lock.releaseLock(); }
   return { ok: true };
+}
+
+
+/* ================= Duty shift roster ================= */
+function shiftsList_() {
+  const sh = sheet_('Shifts');
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  return sh.getRange(2, 1, n, 3).getValues().filter(function (r) { return String(r[0]).trim(); })
+    .map(function (r) { return { code: String(r[0]).trim().toUpperCase(), name: String(r[1]).trim(), timing: String(r[2]).trim() }; });
+}
+function rosterPdf_(req) {
+  const month = String(req.month || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new Error('Month missing');
+  if (!req.b64 || String(req.b64).length > 9 * 1024 * 1024) throw new Error('PDF missing or too large (max ~6 MB)');
+  const blob = Utilities.newBlob(Utilities.base64Decode(req.b64), 'application/pdf', 'Roster_' + month + '.pdf');
+  const f = DriveApp.getFolderById(PROP.getProperty('PHOTO_FOLDER')).createFile(blob);
+  f.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return { ok: true, id: f.getId() };
 }
