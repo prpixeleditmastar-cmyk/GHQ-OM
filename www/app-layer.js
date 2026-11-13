@@ -72,7 +72,7 @@
   var feederRows = LS.get('ghq_feeders', null);  // master list from the 'Feeders' sheet (cached for offline)
   if (feederRows && !feederRows.length) feederRows = null;
   var layoutSig = '';
-  var ppmRows = LS.get('ghq_ppm', []), ppmLog = {}, clItems = LS.get('ghq_cl_items', []), clRej = {};
+  var ppmRows = LS.get('ghq_ppm', []), ppmLog = {}, clItems = LS.get('ghq_cl_items', []), clRej = {}, dgItems = LS.get('ghq_dg_items', []), dgCanStart = false;
   var roster = {}, rosterPdf = {}, shiftsInfo = LS.get('ghq_shifts', []);
   var syncing = false, lastErr = '', timer = null;
 
@@ -180,6 +180,7 @@
     try { calculateElecConsumption(); calculateWaterConsumption(); calculateBtuConsumption(); } catch (e) {}
     var es = $('screen-entries'); if (es && es.classList.contains('active')) renderEntries();
     var ps = $('screen-ppm'); if (ps && ps.classList.contains('active')) { try { renderPPM(); } catch (e) {} }
+    var dd = $('screen-dg'); if (dd && dd.classList.contains('active')) { try { renderDG(); } catch (e) {} }
     var rr = $('screen-roster'); if (rr && rr.classList.contains('active')) { try { renderRoster(); } catch (e) {} }
   }
 
@@ -205,10 +206,11 @@
     window.openModule = function (id, tab) {
       if ((id === 'screen-users' || id === 'screen-backup') && !(session && session.role === 'admin')) { toast('Admin only'); return; }
       om(id, tab);
-      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
+      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
       if (id === 'screen-ppm') renderPPM();
       if (id === 'screen-roster') renderRoster();
+      if (id === 'screen-dg') { renderDG(); pullDg(); }
       if (id === 'screen-entries') renderEntries();
       if (id === 'screen-users') renderUsers();
       if (id === 'screen-backup') renderBackup();
@@ -255,7 +257,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDg).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -1167,8 +1169,8 @@
   }
   function updateBell() {
     var b = document.querySelector('.action-btn .fa-bell'); b = b && b.parentNode; if (!b) return;
-    var c = clItems.filter(function (r) { return r.can; }).length, bd = b.querySelector('.ghq-badge');
-    if (!b._ghq) { b._ghq = 1; b.style.position = 'relative'; b.setAttribute('onclick', ''); b.onclick = function () { openModule('screen-ppm'); setTimeout(function () { var a = $('ppm-approvals'); if (a) a.scrollIntoView({ behavior: 'smooth' }); }, 150); }; }
+    var c = clItems.filter(function (r) { return r.can; }).length + dgItems.filter(function (r) { return r.can; }).length, bd = b.querySelector('.ghq-badge');
+    if (!b._ghq) { b._ghq = 1; b.style.position = 'relative'; b.setAttribute('onclick', ''); b.onclick = function () { if (!clItems.some(function (r) { return r.can; }) && dgItems.some(function (r) { return r.can; })) { openModule('screen-dg'); return; } openModule('screen-ppm'); setTimeout(function () { var a = $('ppm-approvals'); if (a) a.scrollIntoView({ behavior: 'smooth' }); }, 150); }; }
     if (!bd) { bd = document.createElement('span'); bd.className = 'ghq-badge'; b.appendChild(bd); }
     bd.textContent = c > 9 ? '9+' : c; bd.style.display = c ? 'flex' : 'none';
   }
@@ -1195,6 +1197,162 @@
     }).catch(function () {});
   }
   function rebuildPpmViews() { var sc = $('screen-ppm'); if (sc && sc.classList.contains('active')) { try { renderPPM(); } catch (e) {} } }
+
+  /* ---------- DG & Fuel: monthly DG load trial checklist (Engineer/Admin/PM/APM start -> Supervisor fills -> Engineer -> PM/APM -> PDF) ---------- */
+  var DGT = LS.get('ghq_dg_t', null), dgCtx = null;
+  function dgWait(st) { return st === 'Awaiting readings' ? 'Supervisor (readings)' : st === 'Pending Engineer' ? 'Engineer' : st === 'Pending PM/APM' ? 'PM / APM' : ''; }
+  function dgNum(x) { var v = parseFloat(String(x == null ? '' : x).replace(',', '.')); return isNaN(v) ? null : v; }
+  function dgR(v, n) { return v == null || !isFinite(v) ? '' : Number(v.toFixed(n)); }
+  function dgCalc(d) {                                     // same formulas as the Excel sheet
+    var V = function (k) { var x = (d.vals || {})[k]; return x ? dgNum(x.v) : null; };
+    function avg(a) { var t = a.filter(function (x) { return x != null; }); return t.length ? t.reduce(function (p, c) { return p + c; }, 0) / t.length : null; }
+    var dur = null, m1 = /^(\d{1,2}):(\d\d)/.exec(d.start || ''), m2 = /^(\d{1,2}):(\d\d)/.exec(d.stop || '');
+    if (m1 && m2) { dur = (+m2[1] * 60 + +m2[2]) - (+m1[1] * 60 + +m1[2]); if (dur < 0) dur += 1440; }
+    var mf = dgNum(d.mf); if (mf == null) mf = 10;
+    var units = (V(10) != null && V(9) != null) ? (V(10) - V(9)) * mf : null, dsl = (V(15) != null && V(16) != null) ? V(15) - V(16) : null;
+    return { dur: dur == null ? '' : dur, avgV: dgR(avg([V(1), V(2), V(3)]), 1), avgI: dgR(avg([V(4), V(5), V(6)]), 1), units: dgR(units, 2), diesel: dgR(dsl, 2), upl: (units != null && dsl) ? dgR(units / dsl, 2) : '', ekw: (V(7) != null && dur != null) ? dgR(V(7) * dur / 60, 2) : '' };
+  }
+  function calcBlock(d) {
+    var c = dgCalc(d);
+    function row(l, u, v) { return '<div style="display:flex;justify-content:space-between;font-size:.8rem;padding:3px 0;color:#e2e8f0"><span>' + l + '</span><b style="color:var(--gold-light)">' + (v === '' ? '—' : esc(v)) + ' <small style="color:var(--text-muted)">' + u + '</small></b></div>'; }
+    return '<div class="sub-section-header" style="margin-top:8px">Calculations (auto)</div>' + row('Trial duration', 'min', c.dur) + row('Average voltage', 'V', c.avgV) + row('Average current', 'A', c.avgI) +
+      row('Total units generated', 'kWh', c.units) + row('Diesel consumed', 'ltr', c.diesel) + row('Units per litre', 'kWh/ltr', c.upl) + row('Energy check: kW × hours', 'kWh', c.ekw);
+  }
+  function renderDG() {
+    var el = $('tab-dg-trial'); if (!el) return;
+    var me = session && session.name, open = dgItems.filter(function (r) { return r.status !== 'Approved'; }), done = dgItems.filter(function (r) { return r.status === 'Approved'; });
+    var h = '<div class="section-title"><span>DG Load Trial — monthly checklist</span><span style="font-size:0.72rem; color:var(--gold-primary)">' + open.filter(function (r) { return r.can; }).length + ' for you</span></div>';
+    if (dgCanStart) h += '<button class="ghq-btn" style="margin:6px 0" onclick="GHQ.dgStart()"><i class="fa-solid fa-play"></i> Start load trial</button>';
+    h += '<div class="sub-section-header" style="margin-top:8px">In progress</div>';
+    h += open.length ? open.map(function (r) {
+      return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-trial">' + esc(r.no) + '</span><span style="font-size:.72rem;color:var(--gold-light)">⏳ Waiting for ' + esc(dgWait(r.status)) + '</span></div>' +
+        '<div class="op-item-title">' + esc(r.dg) + ' — Load trial</div><div class="op-item-desc">' + esc(fmtDate(r.date, r.date)) + ' · ' + esc(r.start) + ' · Started by ' + esc(r.by) + '</div>' +
+        (r.fby ? '<div class="op-item-desc" style="font-size:.7rem;color:#34d399">✔ Supervisor: ' + esc(r.fby) + (r.eng ? ' · Engineer: ' + esc(r.eng) : '') + '</div>' : '') +
+        (r.rem ? '<div class="op-item-desc" style="color:#f87171;font-size:.72rem">' + esc(r.rem) + '</div>' : '') +
+        '<div class="op-item-foot"><span></span><button class="btn-gold-solid" onclick="GHQ.dgOpen(\'' + esc(r.no) + '\')">' + (r.can ? (r.status === 'Awaiting readings' ? 'Fill checklist' : 'Review &amp; approve') : 'View') + '</button></div></div>';
+    }).join('') : '<div class="ghq-note">No load trial in progress.' + (dgCanStart ? '' : ' Engineer / Admin / PM / APM start a trial.') + '</div>';
+    h += '<div class="sub-section-header" style="margin-top:14px">Completed (month wise)</div>';
+    if (!done.length) h += '<div class="ghq-note">Approved checklists appear here.</div>';
+    var MN = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'], groups = {}, order = [];
+    done.forEach(function (r) { var k = String(r.date).slice(0, 7); if (!groups[k]) { groups[k] = []; order.push(k); } groups[k].push(r); });
+    order.sort().reverse().forEach(function (k) {
+      h += '<div class="section-title" style="margin-top:8px"><span>' + MN[+k.slice(5, 7) - 1] + ' ' + k.slice(0, 4) + '</span><span style="font-size:.72rem;color:var(--cyan)">' + groups[k].length + '</span></div>';
+      h += groups[k].map(function (r) {
+        return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-trial">' + esc(r.no) + '</span><span style="font-size:.72rem;color:#34d399">✔ Approved</span></div>' +
+          '<div class="op-item-title">' + esc(r.dg) + '</div><div class="op-item-desc">' + esc(fmtDate(r.date, r.date)) + ' · ' + esc(r.start) + ' · Supervisor ' + esc(r.fby) + ' · Eng ' + esc(r.eng) + ' · PM/APM ' + esc(r.pm) + '</div>' +
+          '<div class="op-item-foot"><button class="btn-gold-outline" onclick="GHQ.dgOpen(\'' + esc(r.no) + '\')">View</button>' + (r.pdf ? '<button class="btn-gold-solid" onclick="GHQ.ppmPdf(\'' + esc(r.pdf) + '\')">Download PDF</button>' : '<span></span>') + '</div></div>';
+      }).join('');
+    });
+    el.innerHTML = h;
+  }
+  function dgStart() {
+    var n = new Date();
+    modal('<h3 class="ghq-h3">Start DG load trial</h3><div class="ghq-note">A separate checklist opens for each DG. The Supervisor will fill it.</div>' +
+      '<div class="ghq-grid2"><div><label class="ghq-lbl">Trial date</label><input id="dg-date" type="date" class="ghq-input" value="' + ymdOf(n) + '"></div><div><label class="ghq-lbl">Start time</label><input id="dg-time" type="time" class="ghq-input" value="' + p2(n.getHours()) + ':' + p2(n.getMinutes()) + '"></div></div>' +
+      '<div class="ghq-grid2"><div><label class="ghq-lbl">DG No. 1</label><input id="dg-1" class="ghq-input" value="DG-01"></div><div><label class="ghq-lbl">DG No. 2 (optional)</label><input id="dg-2" class="ghq-input" value="DG-02"></div></div>' +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" onclick="GHQ.dgStartSubmit()">Open checklists</button></div>');
+  }
+  function dgStartSubmit() {
+    var dgs = [$('dg-1').value, $('dg-2').value].map(function (x) { return x.trim(); }).filter(Boolean);
+    if (!dgs.length) { toast('Enter the DG number'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    api('dg_start', { date: $('dg-date').value, start: $('dg-time').value, dgs: dgs }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      closeModal(); toast('✔ ' + r.nos.join(', ') + ' opened for the Supervisor'); return pullDg();
+    }).catch(function (e) { toast(String(e && e.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + (e && e.message || e)); });
+  }
+  function dgOpen(no) {
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    modal('<div class="ghq-note">Loading…</div>');
+    api('dg_get', { no: no }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      DGT = r.t; LS.set('ghq_dg_t', DGT);
+      var d = r.d || {}, draft = LS.get('ghq_dg_draft_' + no, null);
+      if (r.status === 'Awaiting readings' && r.can && draft) d = draft;
+      dgCtx = { no: no, r: r, d: d, edit: r.status === 'Awaiting readings' && r.can };
+      dgForm();
+    }).catch(function (e) { closeModal(); toast('Could not open: ' + (e && e.message || e)); });
+  }
+  function dgForm() {
+    var c = dgCtx, r = c.r, d = c.d, t = DGT, ed = c.edit; d.vals = d.vals || {};
+    var h = '<h3 class="ghq-h3">' + esc(r.no) + '</h3><div class="ghq-note"><b>' + esc(t.title) + '</b><br>Status: <b>' + esc(r.status) + '</b>' + (r.fby ? '<br>✔ Supervisor: ' + esc(r.fby) : '') + (r.eng ? ' · ✔ Engineer: ' + esc(r.eng) : '') + (r.pm ? ' · ✔ PM/APM: ' + esc(r.pm) : '') + (r.rem ? '<br><span style="color:#f87171">' + esc(r.rem) + '</span>' : '') + '</div>' +
+      '<div class="ghq-grid2"><div><label class="ghq-lbl">Date</label><input class="ghq-input" value="' + esc(d.date) + '" readonly></div><div><label class="ghq-lbl">DG No.</label><input class="ghq-input" value="' + esc(d.dg) + '" readonly></div></div>' +
+      '<label class="ghq-lbl">Location</label><input class="ghq-input" value="' + esc(d.loc || t.loc) + '" readonly>' +
+      '<div class="ghq-grid2"><div><label class="ghq-lbl">Start time</label><input id="dgf-start" type="time" class="ghq-input dg-in" value="' + esc(d.start || '') + '"' + (ed ? '' : ' readonly') + '></div><div><label class="ghq-lbl">Stop time</label><input id="dgf-stop" type="time" class="ghq-input dg-in" value="' + esc(d.stop || '') + '"' + (ed ? '' : ' readonly') + '></div></div>';
+    t.sections.forEach(function (sec) {
+      h += '<div class="sub-section-header" style="margin-top:8px">' + esc(sec.h) + '</div>';
+      sec.items.forEach(function (it) {
+        var x = d.vals[it.sr] || {};
+        h += '<div class="dg-item" data-sr="' + it.sr + '" style="border-bottom:1px dashed rgba(212,175,55,.2);padding:8px 0"><div style="font-size:.82rem;color:#e2e8f0">' + it.sr + '. ' + esc(it.p) + (it.u ? ' <small style="color:var(--text-muted)">(' + esc(it.u) + ')</small>' : '') + '</div>' +
+          (it.ref ? '<div style="font-size:.68rem;color:var(--text-muted);margin-bottom:4px">Reference: ' + esc(it.ref) + '</div>' : '') +
+          '<input class="ghq-input dg-v dg-in" inputmode="decimal" placeholder="Reading" value="' + esc(x.v || '') + '"' + (ed ? '' : ' readonly') + '>' +
+          '<div style="display:flex;gap:6px;margin:6px 0">' + ['OK', 'NOT OK', 'N/A'].map(function (o) { return '<button type="button" class="cl-b' + (x.s === o ? ' on' : '') + '" data-c="' + (o === 'NOT OK' ? 'bad' : o === 'N/A' ? 'na' : 'ok') + '" data-s="' + o + '"' + (ed ? ' onclick="GHQ.dgSet(this)"' : ' disabled') + '>' + o + '</button>'; }).join('') + '</div>' +
+          '<input class="ghq-input dg-r dg-in" placeholder="Remarks" value="' + esc(x.r || '') + '"' + (ed ? '' : ' readonly') + '></div>';
+      });
+    });
+    h += '<label class="ghq-lbl" style="margin-top:8px">Meter multiplying factor (MF)</label><input id="dgf-mf" class="ghq-input dg-in" inputmode="decimal" value="' + esc(d.mf == null ? t.mf : d.mf) + '"' + (ed ? '' : ' readonly') + '>' +
+      '<div id="dg-calc">' + calcBlock(d) + '</div>' +
+      '<label class="ghq-lbl" style="margin-top:8px">Overall remarks (optional)</label><input id="dgf-note" class="ghq-input dg-in" value="' + esc(d.note || '') + '"' + (ed ? '' : ' readonly') + '>';
+    if (ed) h += '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Close (draft saved)</button><button class="ghq-btn" onclick="GHQ.dgSubmit()">Submit for approval</button></div>';
+    else if (r.can) h += '<label class="ghq-lbl" style="margin-top:8px">Reason (needed only to send back)</label><input id="cv-note" class="ghq-input" placeholder="Reason">' +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.dgAct(\'reject\')">Send back</button><button class="ghq-btn" onclick="GHQ.dgAct(\'approve\')">Approve</button></div><button class="ghq-btn ghost" style="margin-top:6px" onclick="GHQ.closeModal()">Close</button>';
+    else h += '<button class="ghq-btn ghost" style="margin-top:8px" onclick="GHQ.closeModal()">Close</button>';
+    modal(h);
+    if (ed) document.querySelectorAll('.ghq-ov-card .dg-in').forEach(function (i) { i.addEventListener('input', dgLive); });
+  }
+  function dgRead() {                                      // current form -> data object
+    var d = JSON.parse(JSON.stringify(dgCtx.d)); d.vals = {};
+    d.start = $('dgf-start').value; d.stop = $('dgf-stop').value; d.mf = $('dgf-mf').value; d.note = $('dgf-note').value.trim();
+    document.querySelectorAll('.dg-item').forEach(function (it) {
+      var on = it.querySelector('.cl-b.on');
+      d.vals[it.getAttribute('data-sr')] = { v: it.querySelector('.dg-v').value.trim(), s: on ? on.getAttribute('data-s') : '', r: it.querySelector('.dg-r').value.trim() };
+    });
+    return d;
+  }
+  function dgLive() {
+    if (!dgCtx || !dgCtx.edit) return;
+    var d = dgRead(); LS.set('ghq_dg_draft_' + dgCtx.no, d);
+    var b = $('dg-calc'); if (b) b.innerHTML = calcBlock(d);
+  }
+  function dgSet(btn) { var row = btn.parentNode; Array.prototype.forEach.call(row.children, function (b) { b.classList.remove('on'); }); btn.classList.add('on'); row.parentNode.style.background = ''; dgLive(); }
+  function dgSubmit() {
+    var d = dgRead(), bad = 0, first = null;
+    if (!d.start || !d.stop) { toast('Enter the start and stop time'); return; }
+    document.querySelectorAll('.dg-item').forEach(function (it) {
+      var x = d.vals[it.getAttribute('data-sr')], miss = !x.s || (x.s !== 'N/A' && x.v === '');
+      it.style.background = miss ? 'rgba(248,113,113,.12)' : ''; if (miss) { bad++; if (!first) first = it; }
+    });
+    if (bad) { toast('Fill reading and OK / NOT OK for ' + bad + ' more point' + (bad > 1 ? 's' : '')); if (first) first.scrollIntoView({ block: 'center' }); return; }
+    if (!navigator.onLine) { toast('Internet required to submit — draft is saved'); return; }
+    api('dg_submit', { no: dgCtx.no, d: d }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      LS.set('ghq_dg_draft_' + dgCtx.no, null); closeModal(); dgCtx = null; toast('✔ Submitted — sent to Engineer for approval'); return pullDg();
+    }).catch(function (e) { toast(String(e && e.message) === 'Failed to fetch' ? 'Internet required — draft is saved' : 'Error: ' + (e && e.message || e)); });
+  }
+  function dgAct(act) {
+    var note = ($('cv-note') || {}).value || '';
+    if (act === 'reject' && !note.trim()) { toast('Enter the reason to send back'); return; }
+    toast('Please wait…');
+    api('dg_act', { no: dgCtx.no, act: act, note: note.trim() }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      closeModal(); dgCtx = null;
+      toast(r.status === 'Approved' ? '✔ Approved — final PDF created' : act === 'reject' ? 'Sent back to the Supervisor' : '✔ Approved — sent to PM / APM');
+      return pullDg();
+    }).catch(function (e) { toast(String(e && e.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + (e && e.message || e)); });
+  }
+  function pullDg() {
+    if (LOCAL || !session) return Promise.resolve();
+    return api('dg_list').then(function (r) {
+      if (!r || !r.ok || !Array.isArray(r.list)) return;
+      dgItems = r.list; dgCanStart = !!r.canStart; LS.set('ghq_dg_items', dgItems);
+      var seenN = LS.get('ghq_dg_seen', {}), todo = 0;
+      dgItems.forEach(function (x) { if (x.can && seenN[x.no] !== x.status) { todo++; seenN[x.no] = x.status; } });
+      LS.set('ghq_dg_seen', seenN);
+      if (todo) toast('🔔 ' + todo + ' DG load trial checklist' + (todo > 1 ? 's' : '') + ' need your action');
+      updateBell();
+      var sc = $('screen-dg'); if (sc && sc.classList.contains('active')) renderDG();
+    }).catch(function () {});
+  }
   function ppmDone(i) {
     var e = ppmRows[i]; if (!e) return;
     var date = $('pd-date').value, note = $('pd-note').value.trim();
@@ -1422,7 +1580,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
