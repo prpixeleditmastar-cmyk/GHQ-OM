@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v6 · build ' + BUILD;
+  var VERSION = 'v7 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -180,6 +180,7 @@
     try { calculateElecConsumption(); calculateWaterConsumption(); calculateBtuConsumption(); } catch (e) {}
     var es = $('screen-entries'); if (es && es.classList.contains('active')) renderEntries();
     var ps = $('screen-ppm'); if (ps && ps.classList.contains('active')) { try { renderPPM(); } catch (e) {} }
+    var rps = $('screen-reports'); if (rps && rps.classList.contains('active') && !repCtx) { try { renderRep(); } catch (e) {} }
     var dd = $('screen-dg'); if (dd && dd.classList.contains('active')) { try { renderDG(); } catch (e) {} }
     var rr = $('screen-roster'); if (rr && rr.classList.contains('active')) { try { renderRoster(); } catch (e) {} }
   }
@@ -206,11 +207,12 @@
     window.openModule = function (id, tab) {
       if ((id === 'screen-users' || id === 'screen-backup') && !(session && session.role === 'admin')) { toast('Admin only'); return; }
       om(id, tab);
-      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
+      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
       if (id === 'screen-ppm') renderPPM();
       if (id === 'screen-roster') renderRoster();
       if (id === 'screen-dg') { renderDG(); pullDg(); }
+      if (id === 'screen-reports') { renderRep(); pullRep(); }
       if (id === 'screen-entries') renderEntries();
       if (id === 'screen-users') renderUsers();
       if (id === 'screen-backup') renderBackup();
@@ -257,7 +259,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDg).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDg).then(pullRep).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -1169,8 +1171,8 @@
   }
   function updateBell() {
     var b = document.querySelector('.action-btn .fa-bell'); b = b && b.parentNode; if (!b) return;
-    var c = clItems.filter(function (r) { return r.can; }).length + dgItems.filter(function (r) { return r.can; }).length, bd = b.querySelector('.ghq-badge');
-    if (!b._ghq) { b._ghq = 1; b.style.position = 'relative'; b.setAttribute('onclick', ''); b.onclick = function () { if (!clItems.some(function (r) { return r.can; }) && dgItems.some(function (r) { return r.can; })) { openModule('screen-dg'); return; } openModule('screen-ppm'); setTimeout(function () { var a = $('ppm-approvals'); if (a) a.scrollIntoView({ behavior: 'smooth' }); }, 150); }; }
+    var c = clItems.filter(function (r) { return r.can; }).length + dgItems.filter(function (r) { return r.can; }).length + repItems.filter(function (r) { return r.can; }).length, bd = b.querySelector('.ghq-badge');
+    if (!b._ghq) { b._ghq = 1; b.style.position = 'relative'; b.setAttribute('onclick', ''); b.onclick = function () { if (!clItems.some(function (r) { return r.can; }) && dgItems.some(function (r) { return r.can; })) { openModule('screen-dg'); return; } if (!clItems.some(function (r) { return r.can; }) && repItems.some(function (r) { return r.can; })) { openModule('screen-reports'); return; } openModule('screen-ppm'); setTimeout(function () { var a = $('ppm-approvals'); if (a) a.scrollIntoView({ behavior: 'smooth' }); }, 150); }; }
     if (!bd) { bd = document.createElement('span'); bd.className = 'ghq-badge'; b.appendChild(bd); }
     bd.textContent = c > 9 ? '9+' : c; bd.style.display = c ? 'flex' : 'none';
   }
@@ -1352,6 +1354,211 @@
       updateBell();
       var sc = $('screen-dg'); if (sc && sc.classList.contains('active')) renderDG();
     }).catch(function () {});
+  }
+
+  /* ---------- O&M Reports: DSR / WSR / MMR (auto draft -> Engineer checks & edits -> PM/APM approves -> PDF + Excel) ---------- */
+  var repItems = LS.get('ghq_rep_items', []), repInfo = LS.get('ghq_rep_info', { canGen: false, canDl: false, tpl: {} }), repCtx = null, repExtra = {};
+  var P6 = ['GHQ', 'NMAEYC', 'HELIPAD', 'Facade Light & Logo', 'MMR Room', 'EV Charging'], PC = ['B', 'C', 'D', 'E', 'F', 'G'];
+  var EQ_OPTS = P6.concat(['Transformer', 'LT Panel', 'APFC Panel', 'UPS', 'HVAC', 'Lift', 'Fire Fighting', 'Other']);
+  var REPN = { DSR: 'Daily Status Report', WSR: 'Weekly Status Report', MMR: 'Monthly Maintenance Report' };
+  function canRepDl() { return !!session && !(session.role === 'staff' && !isSupervisor()); }
+  function repWait(st) { return st === 'Pending Engineer' ? 'Engineer' : st === 'Pending PM/APM' ? 'PM / APM' : ''; }
+  function renderRep() {
+    ['DSR', 'WSR', 'MMR'].forEach(function (t) {
+      var el = $('tab-rep-' + t.toLowerCase()); if (!el) return;
+      var list = repItems.filter(function (r) { return r.type === t; }), now = new Date(), h = '';
+      h += '<div class="section-title"><span>' + REPN[t] + '</span><span style="font-size:.72rem;color:var(--cyan)">' + list.filter(function (r) { return r.can; }).length + ' for you</span></div>';
+      if (repInfo.canGen) {
+        var inp = t === 'MMR' ? '<input id="rg-' + t + '" type="month" class="ghq-input" value="' + now.getFullYear() + '-' + p2(now.getMonth() + 1) + '">' : '<input id="rg-' + t + '" type="date" class="ghq-input" value="' + ymdOf(now) + '">';
+        h += '<div class="ghq-note">A draft is created automatically every morning. To make one now, choose ' + (t === 'DSR' ? 'the date' : t === 'WSR' ? 'the Monday of the week' : 'the month') + ':</div><div class="ghq-grid2">' + inp + '<button class="ghq-btn" onclick="GHQ.repGen(\'' + t + '\')">Generate draft</button></div>';
+        if (!(repInfo.tpl || {})[t]) h += '<div class="ghq-note" style="color:#f87171">Template link for ' + t + ' is missing (ReportTemplates tab) — PDF / Excel cannot be created yet.</div>';
+      }
+      h += list.length ? list.map(function (r) {
+        var per = r.type === 'DSR' ? fmtDate(r.start, r.start) : fmtDate(r.start, r.start) + ' → ' + fmtDate(r.end, r.end);
+        return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(r.no) + '</span>' +
+          (r.status === 'Approved' ? '<span style="font-size:.72rem;color:#34d399">✔ Approved</span>' : '<span style="font-size:.72rem;color:var(--gold-light)">⏳ Waiting for ' + esc(repWait(r.status)) + '</span>') + '</div>' +
+          '<div class="op-item-title">' + esc(per) + '</div>' +
+          (r.eng ? '<div class="op-item-desc" style="font-size:.7rem;color:#34d399">✔ Engineer: ' + esc(r.eng) + (r.pm ? ' · PM/APM: ' + esc(r.pm) : '') + '</div>' : '') +
+          (r.rem ? '<div class="op-item-desc" style="color:#f87171;font-size:.72rem">' + esc(r.rem) + '</div>' : '') +
+          '<div class="op-item-foot"><button class="btn-gold-outline" onclick="GHQ.repOpen(\'' + esc(r.no) + '\')">' + (r.can ? (r.canEdit ? 'Check &amp; edit' : 'Review') : 'View') + '</button>' +
+          (r.status === 'Approved' && r.files && canRepDl() ? '<span style="display:flex;gap:6px"><button class="btn-gold-solid" onclick="GHQ.repDl(\'' + esc(r.no) + '\',\'pdf\')">PDF</button><button class="btn-gold-solid" onclick="GHQ.repDl(\'' + esc(r.no) + '\',\'xlsx\')">Excel</button></span>' : '<span></span>') + '</div></div>';
+      }).join('') : '<div class="ghq-note">No report yet.</div>';
+      el.innerHTML = h;
+    });
+  }
+  function repGen(t) {
+    var v = ($('rg-' + t) || {}).value; if (!v) { toast('Select the date / month'); return; }
+    toast('Creating draft…');
+    api('rep_generate', { type: t, start: t === 'MMR' ? v + '-01' : v }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error'); toast('✔ Draft ' + r.no + ' created'); return pullRep();
+    }).catch(function (e) { toast(String(e && e.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + (e && e.message || e)); });
+  }
+  function pullRep() {
+    if (LOCAL || !session) return Promise.resolve();
+    return api('rep_list').then(function (r) {
+      if (!r || !r.ok || !Array.isArray(r.list)) return;
+      repItems = r.list; repInfo = { canGen: !!r.canGen, canDl: !!r.canDl, tpl: r.tpl || {} }; LS.set('ghq_rep_items', repItems); LS.set('ghq_rep_info', repInfo);
+      var seenN = LS.get('ghq_rep_seen', {}), todo = 0;
+      repItems.forEach(function (x) { if (x.can && seenN[x.no] !== x.status) { todo++; seenN[x.no] = x.status; } });
+      LS.set('ghq_rep_seen', seenN);
+      if (todo) toast('🔔 ' + todo + ' report' + (todo > 1 ? 's' : '') + ' waiting for your approval');
+      updateBell();
+      var sc = $('screen-reports'); if (sc && sc.classList.contains('active') && !repCtx) renderRep();
+    }).catch(function () {});
+  }
+  function repDl(no, kind) {
+    if (!canRepDl()) { toast('Download is not allowed'); return; }
+    toast('Preparing ' + (kind === 'xlsx' ? 'Excel' : 'PDF') + '…');
+    api('rep_file', { no: no, kind: kind }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      var bin = atob(r.b64), bytes = new Uint8Array(bin.length); for (var k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+      return saveBytes(r.name, r.mime || 'application/octet-stream', bytes);
+    }).catch(function (e) { toast(String(e && e.message) === 'Failed to fetch' ? 'Internet required' : 'Could not download: ' + (e && e.message || e)); });
+  }
+  /* --- editor --- */
+  function rcv(a) { var v = repCtx.cells[a]; return v == null ? '' : String(v).replace(/^[dt]:/, ''); }
+  function rnum(a) { var v = repCtx.cells[a]; if (v === '' || v == null) return null; var n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.')); return isNaN(n) ? null : n; }
+  function rtm(a) { var m = /^t:(\d{1,2}):(\d\d)$/.exec(String(repCtx.cells[a] || '')); return m ? +m[1] * 60 + +m[2] : null; }
+  function rfld(a, l, t, opts, wide) {
+    var ro = !repCtx.edit, h = '<div' + (wide ? ' style="grid-column:1/-1"' : '') + '><label class="ghq-lbl" style="font-size:.66rem">' + esc(l) + '</label>';
+    if (t === 'sel') { var cur = rcv(a), list = opts.slice(); if (cur && list.indexOf(cur) < 0) list.push(cur); h += '<select class="cal-select rp" data-a="' + a + '" data-t="sel" style="width:100%"' + (ro ? ' disabled' : '') + '><option value=""></option>' + list.map(function (o) { return '<option' + (cur === o ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select>'; }
+    else if (t === 'area') h += '<textarea class="ghq-input rp" data-a="' + a + '" data-t="text" rows="2"' + (ro ? ' readonly' : '') + '>' + esc(rcv(a)) + '</textarea>';
+    else h += '<input class="ghq-input rp" data-a="' + a + '" data-t="' + (t === 'eq' ? 'text' : t || 'text') + '"' + (t === 'num' ? ' inputmode="decimal"' : '') + (t === 'date' ? ' type="date"' : t === 'time' ? ' type="time"' : '') + (t === 'eq' ? ' list="rp-eq"' : '') + ' value="' + esc(rcv(a)) + '"' + (ro ? ' readonly' : '') + '>';
+    return h + '</div>';
+  }
+  function rcalc(key, label, unit) { return '<div style="display:flex;justify-content:space-between;font-size:.76rem;color:#e2e8f0;padding:2px 0"><span>' + esc(label) + '</span><b style="color:var(--gold-light)"><span class="rc" data-c="' + key + '">—</span> <small style="color:var(--text-muted)">' + (unit || '') + '</small></b></div>'; }
+  function rhead(t) { return '<div class="sub-section-header" style="margin-top:12px">' + esc(t) + '</div>'; }
+  function rcard(title, inner) { return '<div style="border:1px solid rgba(212,175,55,.18);border-radius:10px;padding:8px;margin:6px 0"><div style="font-size:.78rem;color:var(--gold-light);margin-bottom:4px">' + title + '</div><div class="ghq-grid2">' + inner + '</div></div>'; }
+  function rrows(sec, r0, max, cols) {                 // how many repeating rows to show (filled ones + 1 blank + added)
+    var last = -1; for (var i = 0; i < max; i++) { if (cols.some(function (c) { return rcv(c + (r0 + i)) !== ''; })) last = i; }
+    return Math.min(max, last + 2 + (repExtra[sec] || 0));
+  }
+  function raddBtn(sec) { return repCtx.edit ? '<button class="ghq-btn ghost" style="margin-top:4px" onclick="GHQ.repAddRow(\'' + sec + '\')">+ Add row</button>' : ''; }
+  function rgrid(r0, days, startDate) {
+    var h = '<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:.7rem;color:#e2e8f0"><tr><th style="padding:3px 6px;text-align:left">Date</th>' + P6.map(function (p) { return '<th style="padding:3px 4px;min-width:78px">' + esc(p) + '</th>'; }).join('') + '<th style="padding:3px 6px">Total</th></tr>';
+    for (var i = 0; i < days; i++) {
+      var d = new Date(parseYmd(startDate).getTime() + i * 864e5), r = r0 + i;
+      h += '<tr><td style="padding:2px 6px;white-space:nowrap">' + ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + p2(d.getDate()) + '</td>' + PC.map(function (c) { return '<td style="padding:1px"><input class="ghq-input rp" style="padding:4px;width:78px" inputmode="decimal" data-a="' + c + r + '" data-t="num" value="' + esc(rcv(c + r)) + '"' + (repCtx.edit ? '' : ' readonly') + '></td>'; }).join('') + '<td style="padding:2px 6px"><b class="rc" data-c="rt' + r + '">—</b></td></tr>';
+    }
+    return h + '<tr><td style="padding:3px 6px"><b>TOTAL</b></td>' + PC.map(function (c) { return '<td style="padding:3px;text-align:center"><b class="rc" data-c="ct' + c + '">—</b></td>'; }).join('') + '<td style="padding:3px 6px"><b class="rc" data-c="ctall">—</b></td></tr></table></div>';
+  }
+  function rform() {
+    var c = repCtx, t = c.type, h = '<datalist id="rp-eq">' + EQ_OPTS.map(function (o) { return '<option value="' + esc(o) + '">'; }).join('') + '</datalist>';
+    h += '<h3 class="ghq-h3">' + esc(c.no) + '</h3><div class="ghq-note"><b>' + esc(REPN[t]) + '</b> · ' + esc(fmtDate(c.start, c.start)) + (t === 'DSR' ? '' : ' → ' + esc(fmtDate(c.end, c.end))) + '<br>Status: <b>' + esc(c.status) + '</b>' + (c.eng ? '<br>✔ Engineer: ' + esc(c.eng) : '') + (c.pm ? ' · ✔ PM/APM: ' + esc(c.pm) : '') + (c.rem ? '<br><span style="color:#f87171">' + esc(c.rem) + '</span>' : '') +
+      (c.edit ? '<br>Numbers are filled automatically from the app. Check them and correct anything that is wrong.' : '') + '</div>';
+    var pairs = '<div class="ghq-grid2">' + (t === 'DSR' ? rfld('E3', 'Shift', 'sel', ['General', 'Morning', 'Evening', 'Night']) : '') + rfld('B4', 'Prepared by', 'text') + (t === 'DSR' ? '' : rfld('E4', 'Checked by', 'text')) + '</div>';
+    h += pairs;
+    if (t === 'DSR') {
+      h += rhead('A. Meter readings & energy consumption');
+      P6.forEach(function (p, i) { var r = 8 + i; h += rcard(esc(p) + ' — consumption <b class="rc" data-c="dc' + r + '">—</b> kWh', rfld('B' + r, 'Opening (kWh)', 'num') + rfld('C' + r, 'Closing (kWh)', 'num') + rfld('E' + r, 'Max demand (kVA)', 'num') + rfld('F' + r, 'Avg PF', 'num') + rfld('G' + r, 'Avg voltage (V)', 'num') + rfld('H' + r, 'Status', 'sel', ['Running', 'Standby', 'Off', 'Under Maintenance', 'Breakdown']) + rfld('I' + r, 'Remarks', 'text', null, true)); });
+      h += rcalc('dtot', 'TOTAL consumption', 'kWh');
+      h += rhead('B. Breakdown / fault log');
+      var nf = rrows('f', 18, 5, ['A', 'B']); for (var i = 0; i < nf; i++) { var r = 18 + i; h += rcard('Fault ' + (i + 1) + ' — downtime <b class="rc" data-c="fd' + r + '">—</b> hrs', rfld('A' + r, 'Point / equipment', 'eq', null, true) + rfld('B' + r, 'Fault / complaint', 'text', null, true) + rfld('C' + r, 'Start time', 'time') + rfld('D' + r, 'End time', 'time') + rfld('F' + r, 'Root cause', 'text') + rfld('G' + r, 'Action taken', 'text') + rfld('H' + r, 'Attended by', 'text') + rfld('I' + r, 'Status', 'sel', ['Open', 'Closed'])); }
+      h += raddBtn('f') + rcalc('fcount', 'Total breakdowns', 'nos') + rcalc('fdt', 'Total downtime', 'hrs');
+      h += rhead('C. Preventive maintenance done today');
+      var np = rrows('p', 27, 4, ['A', 'B']); for (var j = 0; j < np; j++) { var q = 27 + j; h += rcard('PM ' + (j + 1), rfld('A' + q, 'Point / equipment', 'eq', null, true) + rfld('B' + q, 'PM activity', 'text', null, true) + rfld('E' + q, 'Status', 'sel', ['Planned', 'Done', 'Pending']) + rfld('F' + q, 'Done by', 'text') + rfld('G' + q, 'Remarks', 'text', null, true)); }
+      h += raddBtn('p');
+      h += rhead('D. Equipment status');
+      ['Transformer', 'LT Panel', 'APFC Panel', 'UPS', 'HVAC', 'Lift', 'Fire Fighting System', 'EV Chargers', 'Helipad Lights'].forEach(function (n, i) { var r2 = 34 + i; h += rcard(esc(n), rfld('B' + r2, 'Status', 'sel', ['Running', 'Standby', 'Off', 'Under Maintenance', 'Breakdown']) + rfld('C' + r2, 'Remarks', 'text')); });
+      h += rhead('E. Complaints, safety & manpower') + '<div class="ghq-grid2">' + [['Complaints received (nos)', 45], ['Complaints closed (nos)', 46], ['Complaints open (nos)', 47], ['Safety incidents (nos)', 48], ['Near misses (nos)', 49], ['Permit to Work issued (nos)', 50], ['Manpower present (nos)', 51], ['Manpower absent (nos)', 52]].map(function (x) { return rfld('B' + x[1], x[0], 'num'); }).join('') + '</div>';
+      h += rhead('F. Other') + rfld('B55', 'Spares / consumables used', 'area') + rfld('B56', 'General remarks', 'area') + rfld('B57', 'Plan for tomorrow', 'area');
+    } else {
+      var W = t === 'WSR', days = W ? 7 : dayCount(c.start, c.end), r0 = W ? 20 : 44, fr = W ? 30 : 54, fmax = W ? 8 : 15, pr = W ? 41 : 72, pmax = W ? 10 : 15;
+      h += rhead('A. Daily energy consumption (kWh)') + rgrid(9, days, c.start);
+      h += rhead('B. Point-wise summary');
+      P6.forEach(function (p, i) { var r = r0 + i; h += rcard(esc(p) + ' — total <b class="rc" data-c="pt' + i + '">—</b> kWh', rfld('F' + r, 'Peak demand (kVA)', 'num') + rfld('G' + r, 'Avg power factor', 'num') + rfld('H' + r, W ? 'Previous week (kWh)' : 'Previous month (kWh)', 'num') + '<div style="font-size:.7rem;color:var(--text-muted)">Avg/day <b class="rc" data-c="pa' + i + '">—</b> · Peak day <b class="rc" data-c="pk' + i + '">—</b> · Share <b class="rc" data-c="ps' + i + '">—</b> · Change <b class="rc" data-c="pc' + i + '">—</b></div>'); });
+      h += rhead(W ? 'C. Breakdown summary' : 'C. Breakdown analysis');
+      var nf2 = rrows('f', fr, fmax, ['C', 'D']); for (var k = 0; k < nf2; k++) { var r3 = fr + k; h += rcard('Breakdown ' + (k + 1), rfld('B' + r3, 'Date', 'date') + rfld('C' + r3, 'Point / equipment', 'eq') + rfld('D' + r3, 'Fault / complaint', 'text', null, true) + rfld('E' + r3, 'Downtime (hrs)', 'num') + rfld('F' + r3, 'Root cause', 'text') + rfld('G' + r3, 'Action taken', 'text') + rfld('H' + r3, 'Status', 'sel', ['Open', 'Closed'])); }
+      h += raddBtn('f');
+      h += rhead('D. Preventive maintenance — planned vs actual');
+      var np2 = rrows('p', pr, pmax, ['C', 'D']); for (var m = 0; m < np2; m++) { var r4 = pr + m; h += rcard('PM ' + (m + 1), rfld('B' + r4, 'Planned date', 'date') + rfld('C' + r4, 'Point / equipment', 'eq') + rfld('D' + r4, 'PM activity', 'text', null, true) + rfld('E' + r4, 'Status', 'sel', ['Planned', 'Done', 'Pending']) + rfld('F' + r4, 'Done by', 'text') + rfld('G' + r4, 'Remarks', 'text', null, true)); }
+      h += raddBtn('p');
+      h += rhead('KPIs (automatic)') + rfld(W ? 'C53' : 'C89', 'Number of points / critical equipment monitored', 'num', null, true) + rcalc('k1', 'Breakdown count', 'nos') + rcalc('k2', 'Total downtime', 'hrs') + rcalc('k3', 'MTTR', 'hrs') + (W ? '' : rcalc('k4', 'MTBF', 'hrs')) + rcalc('k5', 'Equipment availability', '') + rcalc('k6', 'Open jobs', 'nos') + rcalc('k7', 'PM planned', 'nos') + rcalc('k8', 'PM done', 'nos') + rcalc('k9', 'PM compliance', '');
+      if (W) {
+        h += rhead('E. Pending / open jobs'); var no = rrows('o', 65, 6, ['B', 'D']); for (var o = 0; o < no; o++) { var r5 = 65 + o; h += rcard('Job ' + (o + 1), rfld('B' + r5, 'Job description', 'text', null, true) + rfld('D' + r5, 'Point / equipment', 'eq') + rfld('E' + r5, 'Reason for delay', 'text') + rfld('G' + r5, 'Target date', 'date') + rfld('H' + r5, 'Responsible', 'text') + rfld('I' + r5, 'Remarks', 'text', null, true)); }
+        h += raddBtn('o') + rhead('F. Complaints, safety, spares & plan');
+        [['Complaints received / closed (nos)', 73], ['Average complaint response time (hrs)', 74], ['Safety observations / toolbox talk', 75], ['Spares requirement / indent', 76], ['Remarks', 77], ['Plan for next week', 78]].forEach(function (x) { h += rfld('D' + x[1], x[0], 'area'); });
+      } else {
+        h += rhead('E. Maintenance cost (Rs)'); ['Spares & consumables', 'AMC / contractor', 'Repairs', 'Other'].forEach(function (n, i) { var r6 = 102 + i; h += rcard(esc(n) + ' — variance <b class="rc" data-c="cv' + r6 + '">—</b>', rfld('B' + r6, 'Budget (Rs)', 'num') + rfld('C' + r6, 'Actual (Rs)', 'num') + rfld('E' + r6, 'Remarks', 'text', null, true)); });
+        h += rhead('F. Statutory / AMC compliance'); ['Fire safety / fire NOC', 'Lift inspection & licence', 'Transformer / HT testing', 'Earth pit testing', 'Thermography of panels', 'Meter / instrument calibration', 'EV charger service', 'AMC contracts review'].forEach(function (n, i) { var r7 = 110 + i; h += rcard(esc(n), rfld('B' + r7, 'Due date', 'date') + rfld('C' + r7, 'Done date', 'date') + rfld('D' + r7, 'Status', 'sel', ['Done', 'Pending', 'Not Due']) + rfld('E' + r7, 'Remarks', 'text')); });
+        h += rhead('G. Other reporting'); ['Executive summary', 'Root cause analysis & corrective actions', 'Inventory / spares status', 'Safety report (incidents, audits, training)', 'Manpower (attendance, overtime, training)', 'Improvement / energy-saving proposals', 'Plan for next month'].forEach(function (n, i) { h += rfld('B' + (120 + i), n, 'area'); });
+      }
+    }
+    if (c.edit) h += '<div class="ghq-grid2" style="margin-top:12px"><button class="ghq-btn ghost" onclick="GHQ.repSave()">Save changes</button><button class="ghq-btn" onclick="GHQ.repAct(\'approve\')">Approve → PM / APM</button></div><button class="ghq-btn ghost" style="margin-top:6px" onclick="GHQ.repClose()">Close</button>';
+    else if (c.can) h += '<label class="ghq-lbl" style="margin-top:12px">Reason (needed only to send back)</label><input id="cv-note" class="ghq-input" placeholder="Reason"><div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.repAct(\'reject\')">Send back</button><button class="ghq-btn" onclick="GHQ.repAct(\'approve\')">Approve &amp; create PDF + Excel</button></div><button class="ghq-btn ghost" style="margin-top:6px" onclick="GHQ.repClose()">Close</button>';
+    else h += '<button class="ghq-btn ghost" style="margin-top:12px" onclick="GHQ.repClose()">Close</button>';
+    modal(h);
+    var card = document.querySelector('.ghq-ov-card'); if (card) { card.style.maxWidth = '640px'; card.style.width = '96vw'; }
+    document.querySelectorAll('.ghq-ov-card .rp').forEach(function (i) { i.addEventListener('input', repLive); i.addEventListener('change', repLive); });
+    repLive();
+  }
+  function dayCount(a, b) { return Math.round((parseYmd(b) - parseYmd(a)) / 864e5) + 1; }
+  function repCollect() {
+    var cl = JSON.parse(JSON.stringify(repCtx.cells));
+    document.querySelectorAll('.ghq-ov-card .rp').forEach(function (i) {
+      var a = i.getAttribute('data-a'), t = i.getAttribute('data-t'), v = (i.value || '').trim();
+      if (t === 'num') { var n = parseFloat(v.replace(',', '.')); v = v !== '' && !isNaN(n) ? n : v; }
+      else if (i.type === 'date') v = v ? 'd:' + v : '';
+      else if (i.type === 'time') v = v ? 't:' + v : '';
+      cl[a] = v;
+    });
+    repCtx.cells = cl; return cl;
+  }
+  function repLive() {
+    if (!repCtx) return; if (repCtx.edit) repCollect();
+    var R = {}, W = repCtx.type === 'WSR', M = repCtx.type === 'MMR';
+    function f(v, n) { return v === '' || v == null || !isFinite(v) ? '—' : String(Math.round(v * Math.pow(10, n === undefined ? 2 : n)) / Math.pow(10, n === undefined ? 2 : n)); }
+    function pct(v) { return v === '' || v == null || !isFinite(v) ? '—' : (Math.round(v * 1000) / 10) + '%'; }
+    if (repCtx.type === 'DSR') {
+      var tot = 0; for (var r = 8; r <= 13; r++) { var o = rnum('B' + r), cl = rnum('C' + r); R['dc' + r] = (o == null || cl == null) ? '—' : f(cl - o); if (o != null && cl != null) tot += cl - o; }
+      R.dtot = f(tot); var cnt = 0, dt = 0;
+      for (var q = 18; q <= 22; q++) { var a = rtm('C' + q), b = rtm('D' + q); if (rcv('A' + q) !== '') cnt++; if (a != null && b != null) { var h2 = Math.round((((b - a) % 1440 + 1440) % 1440) / 60 * 100) / 100; R['fd' + q] = f(h2); dt += h2; } else R['fd' + q] = '—'; }
+      R.fcount = String(cnt); R.fdt = f(dt);
+    } else {
+      var days = W ? 7 : dayCount(repCtx.start, repCtx.end), colT = [0, 0, 0, 0, 0, 0], colN = [0, 0, 0, 0, 0, 0], colMax = [null, null, null, null, null, null], all = 0, rowTots = [];
+      for (var i = 0; i < days; i++) { var rr = 9 + i, rs = 0, rn = 0; PC.forEach(function (c, j) { var v = rnum(c + rr); if (v != null) { colT[j] += v; colN[j]++; rs += v; rn++; if (colMax[j] == null || v > colMax[j]) colMax[j] = v; } }); R['rt' + rr] = rn ? f(rs) : '—'; if (rn) { rowTots.push(rs); all += rs; } }
+      PC.forEach(function (c, j) { R['ct' + c] = f(colT[j]); }); R.ctall = f(all);
+      var r0 = W ? 20 : 44, mx = null, pf = [], prev = 0;
+      P6.forEach(function (p, i) {
+        R['pt' + i] = f(colT[i]); R['pa' + i] = colN[i] ? f(colT[i] / colN[i]) : '—'; R['pk' + i] = f(colMax[i]); R['ps' + i] = all ? pct(colT[i] / all) : '—';
+        var pv = rnum('H' + (r0 + i)); R['pc' + i] = pv ? pct(colT[i] / pv - 1) : '—';
+      });
+      var fr = W ? 30 : 54, fmax = W ? 8 : 15, pr = W ? 41 : 72, pmax = W ? 10 : 15, n = rnum(W ? 'C53' : 'C89'), hours = days * 24, bc = 0, bd = 0, op = 0, pl = 0, pd = 0;
+      for (var x = 0; x < fmax; x++) { var rw = fr + x; if (rcv((W ? 'C' : 'D') + rw) !== '') bc++; var dv = rnum('E' + rw); if (dv != null) bd += dv; if (rcv('H' + rw) === 'Open') op++; }
+      for (var y = 0; y < pmax; y++) { var rp = pr + y; if (rcv((W ? 'C' : 'D') + rp) !== '') pl++; if (rcv('E' + rp) === 'Done') pd++; }
+      R.k1 = String(bc); R.k2 = f(bd); R.k3 = bc ? f(bd / bc) : '—'; R.k4 = bc && n ? f((hours * n - bd) / bc) : '—'; R.k5 = n ? pct(1 - bd / (hours * n)) : '—'; R.k6 = String(op); R.k7 = String(pl); R.k8 = String(pd); R.k9 = pl ? pct(pd / pl) : '—';
+      if (M) for (var z = 102; z <= 105; z++) { var bu = rnum('B' + z), ac = rnum('C' + z); R['cv' + z] = (bu == null && ac == null) ? '—' : f((ac || 0) - (bu || 0)); }
+    }
+    document.querySelectorAll('.ghq-ov-card .rc').forEach(function (el) { var k = el.getAttribute('data-c'); if (R[k] !== undefined) el.textContent = R[k]; });
+  }
+  function repAddRow(sec) { repCollect(); repExtra[sec] = (repExtra[sec] || 0) + 1; rform(); }
+  function repOpen(no) {
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    modal('<div class="ghq-note">Loading…</div>');
+    api('rep_get', { no: no }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      repExtra = {}; repCtx = { no: no, type: r.type, start: r.start, end: r.end, status: r.status, eng: r.eng, pm: r.pm, rem: r.rem, can: r.can, edit: !!r.canEdit, cells: r.cells || {} };
+      rform();
+    }).catch(function (e) { closeModal(); toast('Could not open: ' + (e && e.message || e)); });
+  }
+  function repClose() { repCtx = null; closeModal(); renderRep(); }
+  function repSave(quiet) {
+    var cells = repCollect();
+    return api('rep_save', { no: repCtx.no, cells: cells }).then(function (r) { if (!r.ok) throw new Error(r.error || 'error'); if (!quiet) toast('✔ Changes saved'); }).catch(function (e) { toast(String(e && e.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + (e && e.message || e)); throw e; });
+  }
+  function repAct(act) {
+    var note = ($('cv-note') || {}).value || '';
+    if (act === 'reject' && !note.trim()) { toast('Enter the reason to send back'); return; }
+    var go = function () {
+      toast(act === 'approve' && !repCtx.edit ? 'Creating PDF and Excel — please wait…' : 'Please wait…');
+      return api('rep_act', { no: repCtx.no, act: act, note: note.trim() }).then(function (r) {
+        if (!r.ok) throw new Error(r.error || 'error');
+        repCtx = null; closeModal();
+        toast(r.status === 'Approved' ? (r.fileError ? '✔ Approved, but files failed: ' + r.fileError : '✔ Approved — PDF and Excel are ready') : r.status === 'Pending Engineer' ? 'Sent back to Engineer' : '✔ Approved — sent to PM / APM');
+        return pullRep().then(renderRep);
+      });
+    };
+    (repCtx.edit ? repSave(true) : Promise.resolve()).then(go).catch(function (e) { if (e && e.message) toast(String(e.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + e.message); });
   }
   function ppmDone(i) {
     var e = ppmRows[i]; if (!e) return;
@@ -1580,7 +1787,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
