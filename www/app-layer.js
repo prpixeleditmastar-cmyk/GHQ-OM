@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v7 · build ' + BUILD;
+  var VERSION = 'v8 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -207,11 +207,12 @@
     window.openModule = function (id, tab) {
       if ((id === 'screen-users' || id === 'screen-backup') && !(session && session.role === 'admin')) { toast('Admin only'); return; }
       om(id, tab);
-      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
+      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
       if (id === 'screen-ppm') renderPPM();
       if (id === 'screen-roster') renderRoster();
       if (id === 'screen-dg') { renderDG(); pullDg(); }
+      if (id === 'screen-assets') { astCat = null; astQ = ''; renderAssets(); pullAssets(); }
       if (id === 'screen-reports') { renderRep(); pullRep(); }
       if (id === 'screen-entries') renderEntries();
       if (id === 'screen-users') renderUsers();
@@ -259,7 +260,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDg).then(pullRep).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -964,7 +965,7 @@
     o.addEventListener('click', function (ev) { if (ev.target === o) closeModal(); });
     document.body.appendChild(o);
   }
-  function closeModal() { var o = $('ghq-ov'); if (o) o.remove(); }
+  function closeModal() { try { stopScan(); } catch (e) {} var o = $('ghq-ov'); if (o) o.remove(); }
   function ppmAdd() {
     if (!canHold()) { toast('Only Supervisor / Engineer / Admin can add equipment'); return; }
     modal('<h3 class="ghq-h3">Add equipment (PPM)</h3>' +
@@ -1564,6 +1565,146 @@
     };
     (repCtx.edit ? repSave(true) : Promise.resolve()).then(go).catch(function (e) { if (e && e.message) toast(String(e.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + e.message); });
   }
+
+  /* ---------- Assets: equipment register per category, QR labels, QR scan ---------- */
+  var LOGO_B64 = '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';
+  try { var lb = atob(LOGO_B64), lu = new Uint8Array(lb.length); for (var li = 0; li < lb.length; li++) lu[li] = lb.charCodeAt(li); if (window.XlsxLite) window.XlsxLite.logo = lu; } catch (e) {}
+  var assets = LS.get('ghq_assets', { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: [], canEdit: false }), astCat = null, astQ = '', scanStream = null, scanTimer = null;
+  var AST_STATUS = ['Running', 'Standby', 'Under Maintenance', 'Breakdown', 'Scrapped'];
+  function pullAssets() {
+    if (LOCAL || !session) return Promise.resolve();
+    return api('asset_list').then(function (r) {
+      if (!r || !r.ok || !Array.isArray(r.items)) return;
+      assets = { cats: r.cats, items: r.items, canEdit: !!r.canEdit }; LS.set('ghq_assets', assets);
+      var sc = $('screen-assets'); if (sc && sc.classList.contains('active') && !$('ghq-ov')) renderAssets();
+    }).catch(function () {});
+  }
+  function astItems() {
+    var q = astQ.toLowerCase();
+    return assets.items.filter(function (a) { return (!astCat || a.cat === astCat) && (!q || [a.tag, a.name, a.loc, a.id, a.make, a.model, a.serial].join(' ').toLowerCase().indexOf(q) >= 0); });
+  }
+  function renderAssets() {
+    var scr = $('screen-assets'); if (!scr) return;
+    ['assets-category-view', 'assets-sheet-view'].forEach(function (id) { var e = $(id); if (e) e.style.display = 'none'; });
+    var root = $('ast-root'); if (!root) { root = document.createElement('div'); root.id = 'ast-root'; root.style.cssText = 'display:flex;flex-direction:column;gap:10px'; scr.appendChild(root); }
+    var h = '<div class="ghq-grid2"><button class="ghq-btn" onclick="GHQ.astScan()"><i class="fa-solid fa-qrcode"></i> Scan QR</button>' + (assets.canEdit || canHold() ? '<button class="ghq-btn ghost" onclick="GHQ.astForm()"><i class="fa-solid fa-plus"></i> Add equipment</button>' : '<span></span>') + '</div>';
+    h += '<input class="ghq-input" placeholder="Search tag, name, location, ID…" value="' + esc(astQ) + '" oninput="GHQ.astSearch(this.value)">';
+    if (!astCat && !astQ) {
+      h += '<div class="section-title"><span>Asset categories</span><span style="font-size:.72rem;color:var(--gold-primary)">' + assets.items.length + ' equipment</span></div>';
+      h += assets.cats.map(function (c) { var n = assets.items.filter(function (a) { return a.cat === c; }).length; return '<div class="op-item-card" onclick="GHQ.astOpen(\'' + esc(c) + '\')" style="cursor:pointer"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(c) + '</span><span style="font-size:.72rem;color:var(--cyan)">' + n + ' equipment</span></div><div class="op-item-title">' + esc(c) + ' assets</div></div>'; }).join('');
+    } else {
+      var list = astItems();
+      h += '<div class="section-title"><span>' + (astCat ? '<a href="javascript:GHQ.astOpen(null)" style="color:var(--gold-light)">← All</a> · ' + esc(astCat) : 'Search results') + '</span><span style="font-size:.72rem;color:var(--cyan)">' + list.length + '</span></div>';
+      if (astCat && list.length) h += '<button class="ghq-btn ghost" onclick="GHQ.astLabels()">Download QR labels (this category)</button>';
+      h += list.length ? list.map(function (a) {
+        return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(a.tag || a.id) + '</span><span style="font-size:.72rem;color:' + (a.status === 'Breakdown' ? '#f87171' : a.status === 'Running' ? '#34d399' : 'var(--gold-light)') + '">' + esc(a.status || '') + '</span></div>' +
+          '<div class="op-item-title">' + esc(a.name) + '</div><div class="op-item-desc">' + esc(a.loc || '') + (a.make ? ' · ' + esc(a.make) : '') + '</div>' +
+          '<div class="op-item-foot"><span style="font-size:.66rem;color:var(--text-muted)">' + esc(a.id) + '</span><button class="btn-gold-solid" onclick="GHQ.astShow(\'' + esc(a.id) + '\')">Details &amp; QR</button></div></div>';
+      }).join('') : '<div class="ghq-note">No equipment found.</div>';
+    }
+    root.innerHTML = h;
+  }
+  function astSearch(v) { astQ = v; var root = $('ast-root'), pos = root && root.querySelector('input.ghq-input'); renderAssets(); var i = $('ast-root').querySelector('input.ghq-input'); if (i) { i.focus(); try { i.setSelectionRange(v.length, v.length); } catch (e) {} } }
+  function astOpen(c) { astCat = c; astQ = ''; renderAssets(); }
+  /* QR */
+  function qrCanvas(text, px) {
+    var qr = qrcode(0, 'M'); qr.addData(text); qr.make();
+    var n = qr.getModuleCount(), m = 3, sc = Math.max(2, Math.floor(px / (n + 2 * m))), size = (n + 2 * m) * sc, c = document.createElement('canvas'); c.width = c.height = size;
+    var x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, size, size); x.fillStyle = '#000';
+    for (var r = 0; r < n; r++) for (var q = 0; q < n; q++) if (qr.isDark(r, q)) x.fillRect((q + m) * sc, (r + m) * sc, sc, sc);
+    return c;
+  }
+  var logoImg = null; (function () { var i = new Image(); i.onload = function () { logoImg = i; }; i.src = 'data:image/png;base64,' + LOGO_B64; })();
+  function labelCanvas(a, w, h) {                        // sticker: QR + names + logo
+    var c = document.createElement('canvas'); c.width = w; c.height = h; var x = c.getContext('2d');
+    x.fillStyle = '#fff'; x.fillRect(0, 0, w, h); x.strokeStyle = '#999'; x.lineWidth = 2; x.strokeRect(1, 1, w - 2, h - 2);
+    var q = qrCanvas('GHQ-ASSET:' + a.id, h - 20); x.drawImage(q, 10, 10, h - 20, h - 20);
+    var tx = h, fs = Math.round(h / 11); x.fillStyle = '#000'; x.textBaseline = 'top';
+    if (logoImg) { var lh = Math.round(h * 0.24), lw = Math.round(lh * logoImg.width / logoImg.height); x.drawImage(logoImg, tx, 12, lw, lh); }
+    function wrap(t, y, size, bold, maxLines) { x.font = (bold ? 'bold ' : '') + size + 'px Arial'; var words = String(t).split(' '), line = '', lines = 0; for (var i = 0; i < words.length; i++) { var test = line ? line + ' ' + words[i] : words[i]; if (x.measureText(test).width > w - tx - 12 && line) { x.fillText(line, tx, y); y += size * 1.2; line = words[i]; if (++lines >= maxLines) return y; } else line = test; } x.fillText(line, tx, y); return y + size * 1.2; }
+    var y = Math.round(h * 0.32);
+    y = wrap(a.name, y, fs * 1.25, true, 2); if (a.tag) y = wrap('Tag: ' + a.tag, y, fs, true, 1); y = wrap(a.id, y, fs * 0.85, false, 1); if (a.loc) wrap(a.loc, y, fs * 0.85, false, 2);
+    return c;
+  }
+  function canvasBytes(c) { return new Promise(function (res) { c.toBlob(function (b) { var fr = new FileReader(); fr.onload = function () { res(new Uint8Array(fr.result)); }; fr.readAsArrayBuffer(b); }, 'image/png'); }); }
+  function astLabel(id) { var a = assets.items.filter(function (x) { return x.id === id; })[0]; if (!a) return; canvasBytes(labelCanvas(a, 900, 360)).then(function (b) { return saveBytes('QR_' + (a.tag || a.id).replace(/[^\w\-]+/g, '_') + '.png', 'image/png', b); }); }
+  function astLabels() {
+    var list = astItems(), per = 12, pages = Math.ceil(list.length / per), chain = Promise.resolve();
+    for (var p = 0; p < pages; p++) (function (p) {
+      chain = chain.then(function () {
+        var W = 1240, H = 1754, c = document.createElement('canvas'); c.width = W; c.height = H; var x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, W, H);
+        list.slice(p * per, p * per + per).forEach(function (a, i) { var lc = labelCanvas(a, 580, 250); x.drawImage(lc, 40 + (i % 2) * 600, 40 + Math.floor(i / 2) * 280); });
+        return canvasBytes(c).then(function (b) { return saveBytes('QR_labels_' + astCat + '_p' + (p + 1) + '.png', 'image/png', b); });
+      });
+    })(p);
+    toast('Preparing ' + pages + ' page' + (pages > 1 ? 's' : '') + ' of QR labels…');
+  }
+  /* details */
+  function astShow(id) {
+    var cached = assets.items.filter(function (x) { return x.id === id; })[0];
+    function draw(a) {
+      var row = function (l, v) { return v ? '<div style="display:flex;justify-content:space-between;gap:8px;font-size:.78rem;padding:3px 0;border-bottom:1px dashed rgba(212,175,55,.15)"><span style="color:var(--text-muted)">' + l + '</span><b style="color:#e2e8f0;text-align:right">' + esc(v) + '</b></div>' : ''; };
+      var today = ymdOf(new Date()), p = a.ppm, h = '<h3 class="ghq-h3">' + esc(a.name) + '</h3><div class="ghq-note">' + esc(a.cat) + ' · ' + esc(a.id) + '</div><div style="text-align:center"><canvas id="ast-qr" style="max-width:190px;width:60%;border:6px solid #fff;border-radius:6px"></canvas></div>' +
+        row('Tag', a.tag) + row('Make', a.make) + row('Model', a.model) + row('Serial no', a.serial) + row('Capacity / rating', a.cap) + row('Location', a.loc) + row('Installed on', a.inst ? fmtDate(a.inst, a.inst) : '') + row('Vendor / AMC', a.vendor) + row('Status', a.status) + row('Remarks', a.rem);
+      h += '<div class="sub-section-header" style="margin-top:10px">Preventive maintenance</div>';
+      if (a.ppm === undefined) h += '<div class="ghq-note">Open with internet to see PPM details.</div>';
+      else if (!p) h += '<div class="ghq-note">No PPM scheduled for this equipment.</div>';
+      else h += row('Frequency', p.freq) + row('Team / vendor', p.team) + row('Last PPM', p.last ? fmtDate(p.last, p.last) : 'Not done yet') + '<div style="display:flex;justify-content:space-between;font-size:.78rem;padding:3px 0"><span style="color:var(--text-muted)">Next PPM due</span><b style="color:' + (p.next && p.next < today ? '#f87171' : '#34d399') + '">' + (p.next ? fmtDate(p.next, p.next) + (p.next < today ? ' (overdue)' : '') : 'Today / not scheduled') + '</b></div>' +
+        (p.history && p.history.length ? '<div class="ghq-note" style="margin-top:4px">Recent: ' + p.history.map(function (x) { return esc(fmtDate(x.date, x.date)) + ' (' + esc(x.by) + ')'; }).join(' · ') + '</div>' : '');
+      if (a.tickets && a.tickets.length) h += '<div class="sub-section-header" style="margin-top:10px">Recent tickets</div>' + a.tickets.map(function (t) { return '<div style="font-size:.76rem;color:#e2e8f0;padding:2px 0">' + esc(t.id) + ' · ' + esc(t.title) + ' <span style="color:' + (t.status === 'Closed' ? '#34d399' : '#f87171') + '">' + esc(t.status) + '</span></div>'; }).join('');
+      h += '<div class="ghq-grid2" style="margin-top:12px"><button class="ghq-btn ghost" onclick="GHQ.astLabel(\'' + esc(a.id) + '\')">Download QR</button>' + (a.canEdit || canHold() ? '<button class="ghq-btn ghost" onclick="GHQ.astForm(\'' + esc(a.id) + '\')">Edit</button>' : '<span></span>') + '</div><button class="ghq-btn" style="margin-top:6px" onclick="GHQ.closeModal()">Close</button>';
+      modal(h); var cv = $('ast-qr'); if (cv) { var q = qrCanvas('GHQ-ASSET:' + a.id, 380); cv.width = q.width; cv.height = q.height; cv.getContext('2d').drawImage(q, 0, 0); }
+    }
+    if (!navigator.onLine || LOCAL) { if (cached) draw(cached); else toast('Not found'); return; }
+    modal('<div class="ghq-note">Loading…</div>');
+    api('asset_get', { id: id }).then(function (r) { if (!r.ok) throw new Error(r.error || 'error'); draw(r); }).catch(function (e) { if (cached) draw(cached); else { closeModal(); toast('Could not open: ' + (e && e.message || e)); } });
+  }
+  /* add / edit */
+  function astForm(id) {
+    if (!canHold()) { toast('Only Supervisor / Engineer / Admin can add equipment'); return; }
+    var a = id ? assets.items.filter(function (x) { return x.id === id; })[0] : null, e = a || { cat: astCat || 'Electrical', status: 'Running' };
+    function f(i, l, v, ph, t) { return '<label class="ghq-lbl">' + l + '</label><input id="af-' + i + '" class="ghq-input"' + (t ? ' type="' + t + '"' : '') + ' value="' + esc(v || '') + '" placeholder="' + esc(ph || '') + '">'; }
+    var h = '<h3 class="ghq-h3">' + (a ? 'Edit equipment' : 'Add equipment') + '</h3>' +
+      '<label class="ghq-lbl">Category</label><select id="af-cat" class="cal-select" style="width:100%"' + (a ? ' disabled' : '') + '>' + assets.cats.map(function (c) { return '<option' + (c === e.cat ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select>' +
+      f('name', 'Equipment name *', e.name, 'e.g. Chiller 1') + f('tag', 'Tag no.', e.tag, 'e.g. CH-01') + '<div class="ghq-grid2"><div>' + f('make', 'Make', e.make) + '</div><div>' + f('model', 'Model', e.model) + '</div></div>' +
+      '<div class="ghq-grid2"><div>' + f('serial', 'Serial no.', e.serial) + '</div><div>' + f('cap', 'Capacity / rating', e.cap, 'e.g. 500 TR') + '</div></div>' + f('loc', 'Location', e.loc, 'e.g. Office Tower / L-11') +
+      '<div class="ghq-grid2"><div>' + f('inst', 'Installed on', e.inst, '', 'date') + '</div><div><label class="ghq-lbl">Status</label><select id="af-status" class="cal-select" style="width:100%">' + AST_STATUS.map(function (s) { return '<option' + (s === e.status ? ' selected' : '') + '>' + s + '</option>'; }).join('') + '</select></div></div>' +
+      f('vendor', 'Vendor / AMC', e.vendor) + f('rem', 'Remarks', e.rem) +
+      '<div class="sub-section-header" style="margin-top:10px">Add to PPM schedule (optional — Electrical / HVAC / Plumbing)</div><div class="ghq-grid2"><div><label class="ghq-lbl">PPM frequency</label><select id="af-pf" class="cal-select" style="width:100%"><option value="">No PPM</option><option>Weekly</option><option>Fortnightly</option><option>Monthly</option><option>Quarterly</option><option>Half-yearly</option><option>Yearly</option></select></div><div>' + f('pl', 'Last PPM done', '', '', 'date') + '</div></div>' + f('pt', 'PPM team / vendor', '') + f('plink', 'Checklist Google Sheet link or name', '') +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" onclick="GHQ.astSave(' + (a ? '\'' + esc(a.id) + '\'' : '') + ')">Save</button></div>';
+    modal(h);
+  }
+  function astSave(id) {
+    var g = function (k) { return ($('af-' + k) || {}).value || ''; }, e = { cat: g('cat'), name: g('name').trim(), tag: g('tag').trim(), make: g('make').trim(), model: g('model').trim(), serial: g('serial').trim(), cap: g('cap').trim(), loc: g('loc').trim(), inst: g('inst'), vendor: g('vendor').trim(), status: g('status'), rem: g('rem').trim(), ppmFreq: g('pf'), ppmLast: g('pl'), team: g('pt').trim(), link: g('plink').trim() };
+    if (!e.name) { toast('Enter the equipment name'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    api(id ? 'asset_update' : 'asset_add', id ? { id: id, e: e } : { e: e }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      toast(r.ppmError ? 'Saved. PPM not added: ' + r.ppmError : '✔ Saved' + (r.ppm ? ' · added to PPM' : ''));
+      closeModal(); return Promise.all([pullAssets(), r.ppm ? pullPpm() : null]).then(function () { renderAssets(); if (!id && r.id) astShow(r.id); });
+    }).catch(function (er) { toast(String(er && er.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + (er && er.message || er)); });
+  }
+  /* QR scan */
+  function stopScan() { if (scanTimer) { clearInterval(scanTimer); scanTimer = null; } if (scanStream) { scanStream.getTracks().forEach(function (t) { t.stop(); }); scanStream = null; } }
+  function astScan() {
+    modal('<h3 class="ghq-h3">Scan equipment QR</h3><video id="scan-v" playsinline muted style="width:100%;border-radius:10px;background:#000;max-height:50vh"></video><div class="ghq-note" id="scan-msg">Starting camera…</div>' +
+      '<label class="ghq-lbl">Or type the Asset ID / Tag</label><div class="ghq-grid2"><input id="scan-id" class="ghq-input" placeholder="JWC-GHQ-EL-0001 or CH-01"><button class="ghq-btn" onclick="GHQ.astFind()">Find</button></div><button class="ghq-btn ghost" style="margin-top:6px" onclick="GHQ.closeModal()">Close</button>');
+    var v = $('scan-v'), cv = document.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { $('scan-msg').textContent = 'Camera not available — type the ID below.'; return; }
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false }).then(function (st) {
+      scanStream = st; v.srcObject = st; v.play(); $('scan-msg').textContent = 'Point the camera at the QR sticker';
+      scanTimer = setInterval(function () {
+        if (!v.videoWidth) return; cv.width = v.videoWidth; cv.height = v.videoHeight; cx.drawImage(v, 0, 0);
+        var im = cx.getImageData(0, 0, cv.width, cv.height), code = jsQR(im.data, im.width, im.height, { inversionAttempts: 'dontInvert' });
+        if (code && /^GHQ-ASSET:/.test(code.data)) { var id = code.data.replace('GHQ-ASSET:', '').trim(); stopScan(); closeModal(); astShow(id); }
+      }, 250);
+    }).catch(function (er) { var m = $('scan-msg'); if (m) m.textContent = 'Could not open the camera (' + (er && er.name || 'error') + '). Allow Camera permission, or type the ID below.'; });
+  }
+  function astFind() {
+    var q = (($('scan-id') || {}).value || '').trim().toLowerCase(); if (!q) return;
+    var a = assets.items.filter(function (x) { return x.id.toLowerCase() === q || (x.tag && x.tag.toLowerCase() === q); })[0];
+    if (!a) { toast('No equipment found for “' + q + '”'); return; } stopScan(); closeModal(); astShow(a.id);
+  }
   function ppmDone(i) {
     var e = ppmRows[i]; if (!e) return;
     var date = $('pd-date').value, note = $('pd-note').value.trim();
@@ -1729,7 +1870,7 @@
     for (var d = 1; d <= n; d++) { head.push(H(d)); wd.push(WD[new Date(roY, roM, d).getDay()]); cols.push(5); }
     var rows = [head, wd];
     ['Name 1', 'Name 2', 'Name 3'].forEach(function (x) { rows.push([x]); });
-    saveBytes('Roster_template_' + monthKey() + '.xlsx', XLSX_MIME, XlsxLite.build([{ name: monthKey(), cols: cols, rows: rows, freeze: { r: 1, c: 1 } }]));
+    saveBytes('Roster_template_' + monthKey() + '.xlsx', XLSX_MIME, XlsxLite.build([{ name: monthKey(), cols: cols, rows: rows, freeze: { r: 1, c: 1 }, noLogo: true }]));
   }
   function readFile(file, asText) {
     return new Promise(function (res, rej) {
@@ -1791,7 +1932,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
