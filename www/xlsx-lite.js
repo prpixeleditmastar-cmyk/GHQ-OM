@@ -14,7 +14,7 @@
     function u16(n) { return [n & 255, (n >> 8) & 255]; }
     function u32(n) { return [n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >>> 24) & 255]; }
     files.forEach(function (f) {
-      var name = enc.encode(f.name), data = enc.encode(f.data), crc = crc32(data);
+      var name = enc.encode(f.name), data = f.bytes || enc.encode(f.data), crc = crc32(data);
       var head = [].concat(u32(0x04034b50), u16(20), u16(0x0800), u16(0), u16(0), u16(0x21), u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0));
       parts.push(new Uint8Array(head), name, data);
       central.push(new Uint8Array([].concat(u32(0x02014b50), u16(20), u16(20), u16(0x0800), u16(0), u16(0), u16(0x21), u32(crc), u32(data.length), u32(data.length), u16(name.length), u16(0), u16(0), u16(0), u16(0), u32(0), u32(offset))), name);
@@ -45,7 +45,7 @@
     '</cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>';
 
   function sheetXml(sh) {
-    var x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+    var x = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
     if (sh.freeze) {
       var fr = (typeof sh.freeze === 'object') ? sh.freeze : { r: 1, c: 0 };
       var tl = col(fr.c || 0) + (fr.r + 1), pn = (fr.c ? 'bottomRight' : 'bottomLeft');
@@ -54,7 +54,7 @@
     if (sh.cols) x += '<cols>' + sh.cols.map(function (w, i) { return '<col min="' + (i + 1) + '" max="' + (i + 1) + '" width="' + w + '" customWidth="1"/>'; }).join('') + '</cols>';
     x += '<sheetData>';
     sh.rows.forEach(function (row, r) {
-      x += '<row r="' + (r + 1) + '">';
+      x += '<row r="' + (r + 1) + '"' + (sh._logo && r === 0 ? ' ht="58" customHeight="1"' : '') + '>';
       row.forEach(function (cell, c) {
         if (cell === null || cell === undefined || cell === '') return;
         var v = cell, s = 0; if (typeof cell === 'object') { v = cell.v; s = cell.s || 0; }
@@ -66,10 +66,21 @@
     });
     x += '</sheetData>';
     if (sh.merges && sh.merges.length) x += '<mergeCells count="' + sh.merges.length + '">' + sh.merges.map(function (m) { return '<mergeCell ref="' + m + '"/>'; }).join('') + '</mergeCells>';
+    if (sh._logo) x += '<drawing r:id="rId1"/>';
     return x + '</worksheet>';
   }
 
+  var LOGO_RATIO = 520 / 368;                              // width / height of the logo picture
+  function shiftRef(m) { return m.replace(/([A-Z]+)(\d+)/g, function (_, c, r) { return c + (+r + 1); }); }
   function build(sheets) {
+    var logo = window.XlsxLite && window.XlsxLite.logo;    // Uint8Array (PNG) -> printed at the top of every sheet
+    if (logo) sheets = sheets.map(function (s) {
+      if (s.noLogo) return s;
+      var n = Object.assign({}, s); n._logo = true; n.rows = [[]].concat(s.rows);
+      if (s.merges) n.merges = s.merges.map(shiftRef);
+      if (s.freeze) n.freeze = (typeof s.freeze === 'object') ? { r: s.freeze.r + 1, c: s.freeze.c || 0 } : { r: 2, c: 0 };
+      return n;
+    });
     var files = [
       { name: '[Content_Types].xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
         sheets.map(function (s, i) { return '<Override PartName="/xl/worksheets/sheet' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'; }).join('') + '</Types>' },
@@ -81,7 +92,23 @@
         '<Relationship Id="rId' + (sheets.length + 1) + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' },
       { name: 'xl/styles.xml', data: STYLES }
     ];
-    sheets.forEach(function (s, i) { files.push({ name: 'xl/worksheets/sheet' + (i + 1) + '.xml', data: sheetXml(s) }); });
+    var anyLogo = false;
+    sheets.forEach(function (s, i) {
+      files.push({ name: 'xl/worksheets/sheet' + (i + 1) + '.xml', data: sheetXml(s) });
+      if (s._logo) {
+        anyLogo = true;
+        var cy = 54 * 9525, cx = Math.round(54 * LOGO_RATIO * 9525);
+        files.push({ name: 'xl/worksheets/_rels/sheet' + (i + 1) + '.xml.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing' + (i + 1) + '.xml"/></Relationships>' });
+        files.push({ name: 'xl/drawings/_rels/drawing' + (i + 1) + '.xml.rels', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/logo.png"/></Relationships>' });
+        files.push({ name: 'xl/drawings/drawing' + (i + 1) + '.xml', data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:colOff>38100</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>19050</xdr:rowOff></xdr:from><xdr:ext cx="' + cx + '" cy="' + cy + '"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="2" name="Logo"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cx + '" cy="' + cy + '"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>' });
+      }
+    });
+    if (anyLogo) {
+      files.push({ name: 'xl/media/logo.png', bytes: logo });
+      var ct = files[0].data.replace('<Default Extension="xml"', '<Default Extension="png" ContentType="image/png"/><Default Extension="xml"');
+      sheets.forEach(function (s, i) { if (s._logo) ct = ct.replace('</Types>', '<Override PartName="/xl/drawings/drawing' + (i + 1) + '.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>'); });
+      files[0].data = ct;
+    }
     return zip(files);
   }
   window.XlsxLite = { build: build, col: function (i) { return col(i - 1); } };
