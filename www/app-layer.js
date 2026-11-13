@@ -1381,7 +1381,7 @@
           (r.eng ? '<div class="op-item-desc" style="font-size:.7rem;color:#34d399">✔ Engineer: ' + esc(r.eng) + (r.pm ? ' · PM/APM: ' + esc(r.pm) : '') + '</div>' : '') +
           (r.rem ? '<div class="op-item-desc" style="color:#f87171;font-size:.72rem">' + esc(r.rem) + '</div>' : '') +
           '<div class="op-item-foot"><button class="btn-gold-outline" onclick="GHQ.repOpen(\'' + esc(r.no) + '\')">' + (r.can ? (r.canEdit ? 'Check &amp; edit' : 'Review') : 'View') + '</button>' +
-          (r.status === 'Approved' && r.files && canRepDl() ? '<span style="display:flex;gap:6px"><button class="btn-gold-solid" onclick="GHQ.repDl(\'' + esc(r.no) + '\',\'pdf\')">PDF</button><button class="btn-gold-solid" onclick="GHQ.repDl(\'' + esc(r.no) + '\',\'xlsx\')">Excel</button></span>' : '<span></span>') + '</div></div>';
+          (r.status === 'Approved' && !r.files && ['admin', 'engineer', 'pm', 'apm'].indexOf(session && session.role) >= 0 ? '<button class="btn-gold-solid" onclick="GHQ.repRegen(\'' + esc(r.no) + '\')">Create files again</button>' : '') + (r.status === 'Approved' && r.files && canRepDl() ? '<span style="display:flex;gap:6px"><button class="btn-gold-solid" onclick="GHQ.repDl(\'' + esc(r.no) + '\',\'pdf\')">PDF</button><button class="btn-gold-solid" onclick="GHQ.repDl(\'' + esc(r.no) + '\',\'xlsx\')">Excel</button></span>' : '<span></span>') + '</div></div>';
       }).join('') : '<div class="ghq-note">No report yet.</div>';
       el.innerHTML = h;
     });
@@ -1405,6 +1405,10 @@
       updateBell();
       var sc = $('screen-reports'); if (sc && sc.classList.contains('active') && !repCtx) renderRep();
     }).catch(function () {});
+  }
+  function repRegen(no) {
+    toast('Creating PDF and Excel — please wait…');
+    api('rep_regen', { no: no }).then(function (r) { if (!r.ok) throw new Error(r.error || 'error'); toast(r.fileError ? 'Some files failed: ' + r.fileError : '✔ PDF and Excel are ready'); return pullRep().then(renderRep); }).catch(function (e) { toast('Error: ' + (e && e.message || e)); });
   }
   function repDl(no, kind) {
     if (!canRepDl()) { toast('Download is not allowed'); return; }
@@ -1787,7 +1791,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
