@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v5.4 · build ' + BUILD;
+  var VERSION = 'v6 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -72,7 +72,7 @@
   var feederRows = LS.get('ghq_feeders', null);  // master list from the 'Feeders' sheet (cached for offline)
   if (feederRows && !feederRows.length) feederRows = null;
   var layoutSig = '';
-  var ppmRows = LS.get('ghq_ppm', []), ppmLog = {};
+  var ppmRows = LS.get('ghq_ppm', []), ppmLog = {}, clItems = LS.get('ghq_cl_items', []), clRej = {};
   var roster = {}, rosterPdf = {}, shiftsInfo = LS.get('ghq_shifts', []);
   var syncing = false, lastErr = '', timer = null;
 
@@ -255,7 +255,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -869,7 +869,7 @@
     x.setDate(Math.min(day, new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate())); return x;
   }
   function eqKey(e) { return (e.name + '|' + (e.loc || '')).toLowerCase(); }
-  function doneDates(e) { var a = (ppmLog[eqKey(e)] || []).slice(); if (e.last) a.push(e.last); return a.sort(); }
+  function doneDates(e) { var k = eqKey(e), a = (ppmLog[k] || []).filter(function (d) { return !clRej[k + '|' + d]; }); if (e.last) a.push(e.last); return a.sort(); }   // a rejected checklist does not count as done
   function lastDone(e) { var a = doneDates(e); return a.length ? a[a.length - 1] : ''; }
   function nextDue(e) { var l = lastDone(e); return l ? addPeriod(parseYmd(l), e.freq) : parseYmd(ymdOf(new Date())); }
   function monthTasks(y, mo) {                         // {day: [{i, e, kind:'due'|'done'}]}
@@ -903,7 +903,8 @@
     return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(e.freq) + ' PM</span>' + st + '</div>' +
       '<div class="op-item-title">' + esc(e.name) + (e.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(e.tag) + ']</span>' : '') + '</div><div class="op-item-desc">' + esc(e.loc || '') + '</div>' +
       '<div class="op-item-foot"><span><i class="fa-solid fa-user-gear"></i> ' + esc(e.team || '—') + '</span>' +
-      '<button class="btn-gold-solid" onclick="GHQ.ppmOpen(' + i + ')">' + (e.hasCl || (e.check && e.check.length) ? 'Open checklist' : 'Mark done') + '</button></div></div>';
+      (kind === 'done' ? '' : (dueD - today) / 864e5 > 0.5 ? '<button class="btn-gold-solid" disabled style="opacity:.45">Opens on ' + esc(fmtDate(ymdOf(dueD), '')) + '</button>'
+        : '<button class="btn-gold-solid" onclick="GHQ.ppmOpen(' + i + ')">' + (e.hasCl || (e.check && e.check.length) ? 'Open checklist' : 'Mark done') + '</button>') + '</div></div>';
   }
   function renderDayList() {
     var ban = $('cal-selected-banner'); if (!ban) return;
@@ -933,7 +934,7 @@
   function renderPPM() {
     var ms = $('cal-month-select'), ys = $('cal-year-select'); if (!ms || !ys) return;
     if (!ppmInit) { var n = new Date(); ms.value = String(n.getMonth()); ys.value = String(n.getFullYear()); selectedCalDay = n.getDate(); ppmInit = true; }
-    injectPpmAdd(); renderCalendar(); renderCatLists(); renderReports();
+    injectPpmAdd(); renderCalendar(); renderCatLists(); renderApprovals(); renderReports();
   }
   window.updateMonthlyTotals = function (month, year) {
     var mt = ppmMonth || monthTasks(year, month), c = { elec: [0, 0], hvac: [0, 0], plumb: [0, 0] }, tot = 0;
@@ -990,7 +991,7 @@
     var chk = (e.check || []).map(function (c, k) { return '<label style="display:flex;gap:8px;align-items:flex-start;font-size:.8rem;color:#e2e8f0;margin:4px 0"><input type="checkbox" style="margin-top:3px"> ' + esc(c) + '</label>'; }).join('');
     modal('<h3 class="ghq-h3">' + esc(e.name) + '</h3><div class="ghq-note">' + esc(e.loc || '') + ' · ' + esc(e.freq) + ' · ' + esc(e.team || '—') + '<br>Last done: ' + (lastDone(e) ? fmtDate(lastDone(e), '—') : '—') + ' · Next due: ' + fmtDate(ymdOf(nextDue(e)), '—') + '</div>' +
       (chk ? '<div class="sub-section-header" style="margin-top:8px">Checklist</div>' + chk : '<div class="ghq-note">No checklist added for this equipment.</div>') +
-      '<label class="ghq-lbl" style="margin-top:8px">Done on</label><input id="pd-date" type="date" class="ghq-input" value="' + ymdOf(new Date()) + '" max="' + ymdOf(new Date()) + '">' +
+      '<label class="ghq-lbl" style="margin-top:8px">Done on</label><input id="pd-date" type="date" class="ghq-input" value="' + ymdOf(new Date()) + '" readonly>' +
       '<label class="ghq-lbl">Note (optional)</label><input id="pd-note" class="ghq-input" placeholder="Remarks">' +
       '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Close</button><button class="ghq-btn" onclick="GHQ.ppmDone(' + i + ')">Mark done</button></div>');
   }
@@ -1002,6 +1003,7 @@
   }
   function ppmOpen(i) {
     var e = ppmRows[i]; if (!e) return;
+    if (nextDue(e) - parseYmd(ymdOf(new Date())) > 36e5) { toast('This checklist opens on ' + fmtDate(ymdOf(nextDue(e)), '')); return; }
     var ck = 'ghq_cl_' + eqKey(e), local = (e.check || []).map(function (t) { return { t: t }; });
     function show(r) { clShow(i, r); }
     if (!e.hasCl || LOCAL) { show({ items: local }); return; }
@@ -1033,7 +1035,7 @@
         '<div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">' + c.opts.map(function (o) { return '<button type="button" class="cl-b" data-c="' + optKind(o) + '" data-s="' + esc(o) + '" onclick="GHQ.clSet(this)">' + esc(o) + '</button>'; }).join('') + '</div>' +
         '<div class="ghq-grid2"><input class="ghq-input cl-v" placeholder="Reading / value"><input class="ghq-input cl-r" placeholder="Remarks"></div></div>';
     });
-    h += '<label class="ghq-lbl" style="margin-top:8px">Done on</label><input id="cl-date" type="date" class="ghq-input" value="' + ymdOf(new Date()) + '" max="' + ymdOf(new Date()) + '">' +
+    h += '<label class="ghq-lbl" style="margin-top:8px">Done on</label><input id="cl-date" type="date" class="ghq-input" value="' + ymdOf(new Date()) + '" readonly>' +
       '<label class="ghq-lbl">Overall remarks (optional)</label><input id="cl-note" class="ghq-input" placeholder="Remarks">' +
       '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Close</button><button class="ghq-btn" onclick="GHQ.clSubmit()">Submit &amp; create PDF</button></div>';
     modal(h);
@@ -1075,7 +1077,7 @@
     });
     var d = { key: eqKey(c.e), eq: c.e.name, tag: c.e.tag || '', loc: c.e.loc || '', title: c.title, cols: c.cols || null, fields: flds, date: date, note: $('cl-note').value.trim(), items: out };
     if (JSON.stringify(d).length > 40000) { toast('Checklist is too long to save'); return; }
-    commit('ppm.checklist', d).then(function () { closeModal(); clCtx = null; toast('✔ Checklist saved — PDF will be created in Drive'); });
+    commit('ppm.checklist', d).then(function () { closeModal(); clCtx = null; toast('✔ Checklist submitted — sent to Supervisor for approval'); });
   }
 
   /* completed checklists (PDF) — Admin / Engineer / RIL / PM / APM */
@@ -1084,14 +1086,14 @@
     var box = $('ppm-reports'), scr = $('screen-ppm');
     if (!scr || !canDownload()) { if (box) box.remove(); return; }
     if (!box) { box = document.createElement('div'); box.id = 'ppm-reports'; box.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-top:14px'; scr.appendChild(box); }
-    box.innerHTML = '<div class="section-title"><span>Completed checklists (PDF)</span><span style="font-size:0.72rem; color:var(--cyan)">' + ppmReports.length + '</span></div>' +
+    box.innerHTML = '<div class="section-title"><span>Approved checklists (PDF)</span><span style="font-size:0.72rem; color:var(--cyan)">' + ppmReports.length + '</span></div>' +
       (ppmReports.length ? ppmReports.map(function (r) {
         return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">PDF</span><span style="font-size:.72rem;color:var(--text-muted)">' + esc(fmtDate(r.date, r.date)) + '</span></div>' +
-          '<div class="op-item-title">' + esc(r.eq) + (r.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(r.tag) + ']</span>' : '') + '</div>' +
+          '<div class="op-item-title">' + (r.no ? '<span style="color:var(--gold-light);font-size:.74rem">' + esc(r.no) + '</span><br>' : '') + esc(r.eq) + (r.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(r.tag) + ']</span>' : '') + '</div>' +
           '<div class="op-item-desc">By ' + esc(r.user) + ' · ' + (Number(r.bad) ? '<span style="color:#f87171">' + r.bad + ' NOT OK</span>' : 'All OK') + '</div>' +
           '<div class="op-item-foot"><a href="' + esc(r.url) + '" target="_blank" rel="noopener" style="color:var(--gold-light);font-size:.75rem">Open in Drive</a>' +
           '<button class="btn-gold-solid" onclick="GHQ.ppmPdf(\'' + esc(r.id) + '\')">Download PDF</button></div></div>';
-      }).join('') : '<div class="ghq-note">PDFs appear here after a checklist is submitted and synced.</div>');
+      }).join('') : '<div class="ghq-note">PDFs appear here after the last approval (Supervisor → Engineer → PM / APM).</div>');
   }
   function ppmPdf(id) {
     if (!canDownload()) { toast('Download is for Admin / Engineer / RIL / PM / APM'); return; }
@@ -1110,6 +1112,89 @@
       var sc = $('screen-ppm'); if (sc && sc.classList.contains('active')) renderReports();
     }).catch(function () {});
   }
+
+  /* ---------- checklist approvals: Technician -> Supervisor -> Engineer -> PM / APM -> PDF ---------- */
+  function clWaiting(st) { return st === 'Pending Supervisor' ? 'Supervisor' : st === 'Pending Engineer' ? 'Engineer' : st === 'Pending PM/APM' ? 'PM / APM' : ''; }
+  function clTrail(r) {
+    return [['Supervisor', r.sup], ['Engineer', r.eng], ['PM / APM', r.pm]].map(function (x) { return x[1] ? '<span style="color:#34d399">✔ ' + x[0] + ': ' + esc(x[1]) + '</span>' : ''; }).filter(Boolean).join(' · ');
+  }
+  function renderApprovals() {
+    var box = $('ppm-approvals'), scr = $('screen-ppm'); if (!scr) return;
+    if (!box) { box = document.createElement('div'); box.id = 'ppm-approvals'; box.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-top:14px'; scr.appendChild(box); }
+    var me = session && session.name;
+    var list = clItems.filter(function (r) { return r.status !== 'Approved' && (r.status !== 'Rejected' || r.by === me); });
+    box.innerHTML = '<div class="section-title"><span>Checklist approvals</span><span style="font-size:0.72rem; color:var(--cyan)">' + list.filter(function (r) { return r.can; }).length + ' for you</span></div>' +
+      (list.length ? list.map(function (r) {
+        var rej = r.status === 'Rejected';
+        return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(r.no || 'Checklist') + '</span>' +
+          (rej ? '<span style="font-size:.72rem;color:#f87171">✖ Rejected</span>' : '<span style="font-size:.72rem;color:var(--gold-light)">⏳ Waiting for ' + esc(clWaiting(r.status)) + '</span>') + '</div>' +
+          '<div class="op-item-title">' + esc(r.eq) + (r.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(r.tag) + ']</span>' : '') + '</div>' +
+          '<div class="op-item-desc">' + esc(fmtDate(r.date, r.date)) + ' · By ' + esc(r.by) + ' · ' + (Number(r.bad) ? '<span style="color:#f87171">' + r.bad + ' NOT OK</span>' : 'All OK') + '</div>' +
+          (clTrail(r) ? '<div class="op-item-desc" style="font-size:.7rem">' + clTrail(r) + '</div>' : '') +
+          (rej && r.rem ? '<div class="op-item-desc" style="color:#f87171;font-size:.72rem">' + esc(r.rem) + '</div>' : '') +
+          '<div class="op-item-foot"><span></span><button class="btn-gold-solid" onclick="GHQ.clView(\'' + esc(r.id) + '\')">' + (r.can ? 'Review &amp; approve' : 'View') + '</button></div></div>';
+      }).join('') : '<div class="ghq-note">No checklist is waiting for approval.</div>');
+  }
+  function clView(id) {
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    modal('<div class="ghq-note">Loading…</div>');
+    api('cl_get', { id: id }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      var d = r.d || {}, n = 0, h = '<h3 class="ghq-h3">' + esc(r.no) + '</h3><div class="ghq-note"><b>' + esc(d.eq || '') + '</b>' + (d.tag ? ' [' + esc(d.tag) + ']' : '') + '<br>' + esc(d.loc || '') + ' · ' + esc(fmtDate(d.date, d.date)) + '<br>Submitted by ' + esc(r.by) + '<br>Status: <b>' + esc(r.status) + '</b>' +
+        (clTrail({ sup: r.sup, eng: r.eng, pm: r.pm }) ? '<br>' + clTrail({ sup: r.sup, eng: r.eng, pm: r.pm }) : '') + (r.rem ? '<br><span style="color:#f87171">' + esc(r.rem) + '</span>' : '') + '</div>';
+      (d.items || []).forEach(function (x) {
+        if (x.h) { h += '<div class="sub-section-header" style="margin-top:8px">' + esc(x.h) + '</div>'; return; }
+        n++; var bad = optKind(x.s) === 'bad';
+        h += '<div style="border-bottom:1px dashed rgba(212,175,55,.2);padding:6px 0;font-size:.8rem;color:#e2e8f0"><div>' + esc(x.sr || n) + '. ' + esc(x.t) + '</div><div style="color:' + (bad ? '#f87171' : '#34d399') + ';font-weight:700">' + esc(x.s) + (x.v ? ' · ' + esc(x.v) : '') + '</div>' + (x.r ? '<div style="color:var(--text-muted)">' + esc(x.r) + '</div>' : '') + '</div>';
+      });
+      if (d.note) h += '<div class="ghq-note" style="margin-top:6px">Remarks: ' + esc(d.note) + '</div>';
+      if (r.can) h += '<label class="ghq-lbl" style="margin-top:8px">Reason (needed only to reject)</label><input id="cv-note" class="ghq-input" placeholder="Reason">' +
+        '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.clAct(\'' + esc(id) + '\',\'reject\')">Reject</button><button class="ghq-btn" onclick="GHQ.clAct(\'' + esc(id) + '\',\'approve\')">Approve</button></div><button class="ghq-btn ghost" style="margin-top:6px" onclick="GHQ.closeModal()">Close</button>';
+      else h += '<button class="ghq-btn ghost" style="margin-top:8px" onclick="GHQ.closeModal()">Close</button>';
+      modal(h);
+    }).catch(function (e) { closeModal(); toast('Could not open: ' + (e && e.message || e)); });
+  }
+  function clAct(id, act) {
+    var note = ($('cv-note') || {}).value || '';
+    if (act === 'reject' && !note.trim()) { toast('Enter the reason to reject'); return; }
+    toast('Please wait…');
+    api('cl_act', { id: id, act: act, note: note.trim() }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      closeModal();
+      toast(r.status === 'Approved' ? '✔ Approved — final PDF created' : r.status === 'Rejected' ? 'Checklist rejected' : '✔ Approved — sent to ' + clWaiting(r.status));
+      return pullChecklists().then(pullReports);
+    }).catch(function (e) { toast(String(e && e.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + (e && e.message || e)); });
+  }
+  function updateBell() {
+    var b = document.querySelector('.action-btn .fa-bell'); b = b && b.parentNode; if (!b) return;
+    var c = clItems.filter(function (r) { return r.can; }).length, bd = b.querySelector('.ghq-badge');
+    if (!b._ghq) { b._ghq = 1; b.style.position = 'relative'; b.setAttribute('onclick', ''); b.onclick = function () { openModule('screen-ppm'); setTimeout(function () { var a = $('ppm-approvals'); if (a) a.scrollIntoView({ behavior: 'smooth' }); }, 150); }; }
+    if (!bd) { bd = document.createElement('span'); bd.className = 'ghq-badge'; b.appendChild(bd); }
+    bd.textContent = c > 9 ? '9+' : c; bd.style.display = c ? 'flex' : 'none';
+  }
+  function pullChecklists() {
+    if (LOCAL || !session) return Promise.resolve();
+    return api('cl_list').then(function (r) {
+      if (!r || !r.ok || !Array.isArray(r.list)) return;
+      clItems = r.list; LS.set('ghq_cl_items', clItems);
+      clRej = {}; clItems.forEach(function (x) { if (x.status === 'Rejected') clRej[(x.eq + '|' + (x.loc || '')).toLowerCase() + '|' + x.date] = 1; });
+      var seenN = LS.get('ghq_cl_seen', null), first = !seenN, todo = 0, msgs = [];
+      seenN = seenN || {};
+      clItems.forEach(function (x) {
+        if (x.can && seenN['a' + x.id] !== x.status) { todo++; seenN['a' + x.id] = x.status; }
+        if (session && x.by === session.name) {
+          var prev = seenN['m' + x.id];
+          if (prev !== x.status && (x.status === 'Approved' || x.status === 'Rejected') && !(first && !prev)) msgs.push(x.no + ' ' + x.status.toLowerCase());
+          seenN['m' + x.id] = x.status;
+        }
+      });
+      LS.set('ghq_cl_seen', seenN);
+      if (todo) toast('🔔 ' + todo + ' checklist' + (todo > 1 ? 's' : '') + ' waiting for your approval');
+      else if (msgs.length) toast('🔔 ' + msgs.join(', '));
+      updateBell(); rebuildPpmViews();
+    }).catch(function () {});
+  }
+  function rebuildPpmViews() { var sc = $('screen-ppm'); if (sc && sc.classList.contains('active')) { try { renderPPM(); } catch (e) {} } }
   function ppmDone(i) {
     var e = ppmRows[i]; if (!e) return;
     var date = $('pd-date').value, note = $('pd-note').value.trim();
@@ -1337,7 +1422,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
