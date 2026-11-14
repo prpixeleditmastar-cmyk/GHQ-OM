@@ -1107,6 +1107,16 @@
     });
     var d = { key: eqKey(c.e), eq: c.e.name, tag: c.e.tag || '', loc: c.e.loc || '', title: c.title, cols: c.cols || null, fields: flds, date: date, note: $('cl-note').value.trim(), items: out };
     if (JSON.stringify(d).length > 40000) { toast('Checklist is too long to save'); return; }
+    if (c.resub) {
+      if (!navigator.onLine) { toast('Internet required to resubmit'); return; }
+      toast('Please wait…');
+      api('cl_resubmit', { id: c.resub, d: d }).then(function (r) {
+        if (!r.ok) throw new Error(r.error || 'error');
+        closeModal(); clCtx = null; toast('✔ Checklist resubmitted — sent to Supervisor for approval');
+        return pullChecklists().then(pullPpm).then(function () { renderPPM(); });
+      }).catch(function (e2) { toast('Error: ' + (e2 && e2.message || e2)); });
+      return;
+    }
     commit('ppm.checklist', d).then(function () { closeModal(); clCtx = null; toast('✔ Checklist submitted — sent to Supervisor for approval'); });
   }
 
@@ -1165,8 +1175,30 @@
           '<div class="op-item-desc">' + esc(fmtDate(r.date, r.date)) + ' · By ' + esc(r.by) + ' · ' + (Number(r.bad) ? '<span style="color:#f87171">' + r.bad + ' NOT OK</span>' : 'All OK') + '</div>' +
           (clTrail(r) ? '<div class="op-item-desc" style="font-size:.7rem">' + clTrail(r) + '</div>' : '') +
           (rej && r.rem ? '<div class="op-item-desc" style="color:#f87171;font-size:.72rem">' + esc(r.rem) + '</div>' : '') +
-          '<div class="op-item-foot"><span></span><button class="btn-gold-solid" onclick="GHQ.clView(\'' + esc(r.id) + '\')">' + (r.can ? 'Review &amp; approve' : 'View') + '</button></div></div>';
+          '<div class="op-item-foot"><span></span>' + (rej && r.by === me ? '<button class="btn-gold-solid" onclick="GHQ.clEdit(\'' + esc(r.id) + '\')">Edit &amp; resubmit</button>' : '<button class="btn-gold-solid" onclick="GHQ.clView(\'' + esc(r.id) + '\')">' + (r.can ? 'Review &amp; approve' : 'View') + '</button>') + '</div></div>';
       }).join('') : '<div class="ghq-note">No checklist is waiting for approval.</div>');
+  }
+  function clEdit(id) {                                // technician fixes a rejected checklist and sends it again
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    modal('<div class="ghq-note">Loading…</div>');
+    api('cl_get', { id: id }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      var d = r.d || {}, e = ppmRows.filter(function (x) { return eqKey(x) === d.key; })[0] || { name: d.eq, tag: d.tag, loc: d.loc, freq: 'Monthly' };
+      var cached = LS.get('ghq_cl_' + (d.key || ''), null), opts = cached && cached.opts && cached.opts.length >= 2 ? cached.opts : ['OK', 'Not OK', 'NA'];
+      (d.items || []).forEach(function (x) { if (!x.h && opts.indexOf(x.s) < 0) opts.push(x.s); });
+      clCtx = { i: -1, e: e, title: d.title || '', items: d.items || [], fields: d.fields ? d.fields.map(function (f) { return { l: f.l }; }) : [], cols: d.cols || null, opts: opts, resub: id };
+      clForm();
+      var rm = document.querySelector('#ghq-ov .ghq-note'); if (rm) rm.innerHTML += '<br><b style="color:#f87171">Editing rejected checklist ' + esc(r.no || '') + '</b>' + (r.rem ? '<br><span style="color:#f87171">' + esc(r.rem) + '</span>' : '');
+      document.querySelectorAll('.cl-item').forEach(function (it) {
+        var x = clCtx.items[+it.getAttribute('data-k')]; if (!x) return;
+        var b = Array.prototype.filter.call(it.querySelectorAll('.cl-b'), function (q) { return q.getAttribute('data-s') === x.s; })[0]; if (b) clSet(b);
+        it.querySelector('.cl-v').value = x.v || ''; it.querySelector('.cl-r').value = x.r || '';
+      });
+      (d.fields || []).forEach(function (f, k) { var inp = document.querySelector('.cl-f[data-k="' + k + '"]'); if (inp) inp.value = f.v || ''; });
+      if ($('cl-note')) $('cl-note').value = d.note || '';
+      if ($('cl-date') && d.date) $('cl-date').value = d.date;
+      var sb = document.querySelector('#ghq-ov button[onclick="GHQ.clSubmit()"]'); if (sb) sb.textContent = 'Resubmit for approval';
+    }).catch(function (e) { closeModal(); toast('Could not open: ' + (e && e.message || e)); });
   }
   function clView(id) {
     if (!navigator.onLine) { toast('Internet required'); return; }
@@ -1967,7 +1999,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
