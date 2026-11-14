@@ -96,12 +96,12 @@
     });
   }
   function resetArr(target, src) { target.length = 0; clone(src).forEach(function (x) { target.push(x); }); }
-  var majorList = [];
+  var majorList = [], dailyLog = {}, dailyTpl = LS.get('ghq_dtpl', []);
   function resetState() {
     resetObj(elecData, BASE.elec, 'elec'); resetObj(waterData, BASE.water, 'water'); resetObj(btuData, BASE.btu, 'btu');
     if (CFG.KEEP_DEMO_TICKETS) resetArr(ticketDatabase, BASE.tickets); else ticketDatabase.length = 0;
     resetArr(amcMasterDatabase, BASE.amc); resetArr(amcPPMSchedules, BASE.ppm);
-    ppmLog = {}; ppmLogId = {}; roster = {}; rosterPdf = {}; majorList.length = 0;
+    ppmLog = {}; ppmLogId = {}; roster = {}; rosterPdf = {}; majorList.length = 0; dailyLog = {};
   }
 
   /* ---------- event replay ---------- */
@@ -118,6 +118,8 @@
       var f = list.filter(function (x) { return x.name === d.feeder; })[0];
       if (!f) return;
       f.prevReading = d.value; f.yesterday = d.consumption || 0; f._first = false; f.lastBy = ev.user; f.lastAt = ev.ts;
+    } else if (ev.type === 'daily.log' && d.dkey) {
+      dailyLog[d.dkey] = ev.id;
     } else if (ev.type === 'major.add' && d.id) {
       var mw = clone(d); mw.status = 'open'; mw.by = ev.user; mw.ts = ev.ts; majorList.push(mw);
     } else if (ev.type === 'major.done') {
@@ -233,6 +235,137 @@
       { u: 'kL Flushing', m: pickSet(function () { return waterData; }, ['nmaeycwater'], ['fwsl05nzone', 'fwsl05mzone']) },
       { u: 'MWH', m: pickSet(function () { return btuData; }, ['nmaeycelebtu'], ['btumeter1', 'btumeter2', 'btumeter3']) }
     ]);
+  }
+  /* ================= Daily Log: Morning / Second / Night shift checklist + IT room temperature ================= */
+  var SHIFTS = [
+    { k: 'Morning', s: '07:00', e: '16:00' },
+    { k: 'Second', s: '14:00', e: '23:00' },
+    { k: 'Night', s: '22:30', e: '07:30' }
+  ];
+  function hm(t) { var a = t.split(':'); return +a[0] * 60 + +a[1]; }
+  function shiftNow(sh) {                              // {open, date (shift date), note}
+    var n = new Date(), m = n.getHours() * 60 + n.getMinutes(), s = hm(sh.s), e = hm(sh.e), td = ymdOf(n), yd = ymdOf(new Date(n.getTime() - 864e5));
+    if (s < e) return m >= s && m < e ? { open: true, date: td } : { open: false, date: td, before: m < s };
+    if (m >= s) return { open: true, date: td };
+    if (m < e) return { open: true, date: yd };
+    return { open: false, date: td, before: true };
+  }
+  function dlEq(kind, sh) { return (kind === 'IT' ? 'IT Room Temperature' : 'Daily Checklist') + ' – ' + sh; }
+  function dlKey(date, sh, kind) { return date + '|' + sh + '|' + kind; }
+  function dlStatus(kind, sh, date) {                  // returns {st, item} or null
+    var eq = dlEq(kind, sh), items = clItems.filter(function (x) { return x.eq === eq && x.date === date; });
+    var live = items.filter(function (x) { return x.status !== 'Rejected'; })[0] || items[0];
+    if (live) return { st: live.status, item: live };
+    if (dailyLog[dlKey(date, sh, kind)]) return { st: 'Pending Supervisor', item: null, sync: true };
+    return null;
+  }
+  function pullDtpl() {
+    if (LOCAL || !session) return Promise.resolve();
+    return api('daily_tpl').then(function (r) { if (r && r.ok && Array.isArray(r.tpl)) { dailyTpl = r.tpl; LS.set('ghq_dtpl', dailyTpl); try { renderDlog(); } catch (e) {} } }).catch(function () {});
+  }
+  function injectDailyLog() {
+    if ($('screen-dlog')) return;
+    var anchor = $('screen-readings'); if (!anchor) return;
+    anchor.insertAdjacentHTML('afterend', '<section class="screen-view" id="screen-dlog"><div class="op-screen-header"><button class="op-back-btn" onclick="openModule(\'screen-dashboard\')"><i class="fa-solid fa-arrow-left"></i> Dashboard</button><div class="op-title-area" style="text-align:right"><h2><i class="fa-solid fa-clipboard-check"></i> Daily Log</h2><p>Shift checklists &amp; IT room temperature</p></div></div><div id="dlog-body"></div></section>');
+    Array.prototype.forEach.call(document.querySelectorAll('.action-pill'), function (el) {
+      if (/Log Reading/i.test(el.textContent)) { el.setAttribute('onclick', "openModule('screen-dlog')"); var sp = el.querySelector('span'); if (sp) sp.textContent = 'Daily Log'; var ic = el.querySelector('i'); if (ic) ic.className = 'fa-solid fa-clipboard-check'; }
+    });
+    setInterval(function () { var sc = $('screen-dlog'); if (sc && sc.classList.contains('active')) renderDlog(); }, 60000);
+  }
+  function dlRow(kind, sh, st) {
+    var s = dlStatus(kind, sh.k, st.date), label = kind === 'IT' ? 'IT Room Temperature' : sh.k + ' Checklist', right = '';
+    var draft = LS.get('ghq_dl_' + dlKey(st.date, sh.k, kind), null);
+    if (s) {
+      var it = s.item, c = s.st === 'Approved' ? '#34d399' : s.st === 'Rejected' ? '#f87171' : 'var(--gold-light)';
+      right = '<span style="font-size:.75rem;color:' + c + '">' + (s.st === 'Approved' ? '✔ Approved' : s.st === 'Rejected' ? '✖ Rejected' : '⏳ Waiting for ' + esc(clWaiting(s.st)) + ' approval') + '</span>';
+      if (it && it.no) right += '<span class="ghq-note" style="margin:0 0 0 6px">' + esc(it.no) + '</span>';
+      if (s.st === 'Approved' && it && it.url) right += ' <a href="' + esc(it.url) + '" target="_blank" rel="noopener" style="color:var(--gold-light);font-size:.75rem">PDF</a>';
+      if (s.st === 'Rejected' && it && it.by === (session && session.name)) right += ' <button class="btn-gold-solid" onclick="GHQ.clEdit(\'' + esc(it.id) + '\')">Edit &amp; resubmit</button>';
+    } else if (st.open || canAdmin()) right = '<button class="btn-gold-solid" onclick="GHQ.dlOpen(\'' + sh.k + '\',\'' + kind + '\',\'' + st.date + '\')">' + (draft ? 'Continue draft' : 'Fill') + '</button>';
+    else right = '<span style="font-size:.75rem;color:' + (st.before ? 'var(--text-muted)' : '#f87171') + '">' + (st.before ? 'Opens at ' + sh.s : 'Not filled') + '</span>';
+    return '<div class="op-item-foot" style="padding:6px 0;border-top:1px dashed rgba(212,175,55,.2)"><span style="font-size:.82rem;color:#e2e8f0">' + label + '</span><span style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;justify-content:flex-end">' + right + '</span></div>' +
+      (s && s.st === 'Rejected' && s.item && s.item.rem ? '<div class="ghq-note" style="color:#f87171">' + esc(s.item.rem) + '</div>' : '');
+  }
+  function renderDlog() {
+    var el = $('dlog-body'); if (!el) return;
+    var h = '';
+    if (!dailyTpl.length) h += '<div class="ghq-note">Checklists not loaded yet. Open this screen once with internet.</div>';
+    SHIFTS.forEach(function (sh) {
+      var st = shiftNow(sh), tag = st.open ? '<span style="color:#34d399;font-size:.72rem">● Open now</span>' : '<span style="color:var(--text-muted);font-size:.72rem">' + (st.before ? 'Opens ' + sh.s : 'Closed') + '</span>';
+      h += '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + sh.k + ' shift</span>' + tag + '</div>' +
+        '<div class="op-item-desc">' + sh.s + ' – ' + sh.e + ' · ' + esc(fmtDate(st.date, '')) + '</div>' + dlRow('Shift', sh, st) + dlRow('IT', sh, st) + '</div>';
+    });
+    el.innerHTML = h;
+  }
+  function dlOpen(shK, kind, date, opt) {
+    opt = opt || {};
+    var rows = dailyTpl.filter(function (r) { return r.form === (kind === 'IT' ? 'IT Room' : shK); });
+    if (!rows.length) { toast('Checklist not loaded — open once with internet'); return; }
+    var dk = dlKey(date, shK, kind), vals = {};
+    if (opt.d) {
+      var di = (opt.d.items || []).filter(function (x) { return !x.h; });
+      rows.forEach(function (r, i) {
+        var x = kind === 'IT' ? di.filter(function (y) { return y.t === (r.tag || r.area); })[0] : di.filter(function (y) { return String(y.sr) === String(r.sr) && String(y.t).indexOf(r.point) === 0; })[0];
+        if (!x) return;
+        vals[i] = kind === 'IT' ? { t: x.tp || '', n: x.n || 'No', w: x.w || 'No', r: x.rm || '' } : { a: x.s || '', b: x.r || '' };
+      });
+    } else vals = LS.get('ghq_dl_' + dk, null) || {};
+    var area = '', h = '<h3 class="ghq-h3">' + (kind === 'IT' ? 'IT Room Temperature Logsheet' : 'GHQ Checklist – ' + shK) + '</h3><div class="ghq-note">' + shK + ' shift · ' + esc(fmtDate(date, '')) + ' · ' + esc(session ? session.name : '') + (opt.rem ? '<br><span style="color:#f87171">' + esc(opt.rem) + '</span>' : '') + '</div><div id="dl-form" data-k="' + esc(dk) + '">';
+    rows.forEach(function (r, i) {
+      var v = vals[i] || {};
+      if (kind === 'IT') {
+        var g = r.level + ' · ' + r.zone + ' · ' + r.area;
+        if (g !== area) { area = g; h += '<div class="sub-section-header" style="margin-top:8px">' + esc(g) + '</div>'; }
+        h += '<div style="padding:6px 0;border-bottom:1px dashed rgba(212,175,55,.2)"><div style="font-weight:700;font-size:.85rem">' + esc(r.tag || r.area) + '</div><div class="ghq-grid2" style="grid-template-columns:1fr 1fr 1fr;gap:6px">' +
+          '<div><label class="ghq-lbl">Temp °C</label><input class="ghq-input dl-in" data-i="' + i + '" data-f="t" type="number" step="0.1" inputmode="decimal" value="' + esc(v.t || '') + '"></div>' +
+          ['n:Noise', 'w:Sweating'].map(function (z) { var f = z.split(':'); return '<div><label class="ghq-lbl">' + f[1] + ' defect</label><select class="cal-select dl-in" data-i="' + i + '" data-f="' + f[0] + '" style="width:100%">' + ['No', 'Yes'].map(function (o) { return '<option' + ((v[f[0]] || 'No') === o ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select></div>'; }).join('') +
+          '</div><input class="ghq-input dl-in" data-i="' + i + '" data-f="r" placeholder="Remarks" value="' + esc(v.r || '') + '"></div>';
+      } else {
+        h += '<div style="padding:8px 0;border-bottom:1px dashed rgba(212,175,55,.2)"><div style="font-weight:700;font-size:.85rem">' + esc(r.sr) + '. ' + esc(r.point) + '</div>' + (r.instr ? '<div class="ghq-note" style="margin:2px 0 4px">' + esc(r.instr) + '</div>' : '') +
+          (r.type === 'single' ? '<textarea class="ghq-input dl-in" rows="2" data-i="' + i + '" data-f="a" placeholder="Status / remark (write \'None\' if all fine)">' + esc(v.a || '') + '</textarea>'
+            : '<input class="ghq-input dl-in" data-i="' + i + '" data-f="a" placeholder="PRE check — status / remark" value="' + esc(v.a || '') + '"><input class="ghq-input dl-in" data-i="' + i + '" data-f="b" placeholder="POST check — status / remark" value="' + esc(v.b || '') + '" style="margin-top:4px">') + '</div>';
+      }
+    });
+    h += '</div><div class="ghq-grid2" style="margin-top:10px"><button class="ghq-btn ghost" onclick="' + (opt.resub ? 'GHQ.closeModal()' : 'GHQ.dlDraft(true)') + '">' + (opt.resub ? 'Cancel' : 'Save draft') + '</button><button class="ghq-btn" onclick="GHQ.dlSubmit(\'' + shK + '\',\'' + kind + '\',\'' + date + '\',\'' + (opt.resub || '') + '\')">' + (opt.resub ? 'Resubmit for approval' : 'Submit') + '</button></div>';
+    modal(h);
+    var f = $('dl-form'); if (f && !opt.resub) f.addEventListener('input', function () { dlDraft(false); });
+  }
+  function dlCollect() {
+    var o = {}; Array.prototype.forEach.call(document.querySelectorAll('.dl-in'), function (el) { var i = el.getAttribute('data-i'); (o[i] = o[i] || {})[el.getAttribute('data-f')] = el.value; });
+    return o;
+  }
+  function dlDraft(show) { var f = $('dl-form'); if (!f) return; LS.set('ghq_dl_' + f.getAttribute('data-k'), dlCollect()); if (show) { toast('Draft saved on this phone'); closeModal(); renderDlog(); } }
+  function dlSubmit(shK, kind, date, resub) {
+    var rows = dailyTpl.filter(function (r) { return r.form === (kind === 'IT' ? 'IT Room' : shK); }), v = dlCollect(), items = [], area = '', empty = 0;
+    rows.forEach(function (r, i) {
+      var x = v[i] || {};
+      if (kind === 'IT') {
+        var g = r.level + ' · ' + r.zone + ' · ' + r.area; if (g !== area) { area = g; items.push({ h: g }); }
+        var tp = String(x.t || '').trim(); if (!tp) empty++;
+        var defect = x.n === 'Yes' || x.w === 'Yes';
+        items.push({ sr: r.sr, t: r.tag || r.area, s: (tp ? tp + ' °C' : '—') + (defect ? ' — Defect' : ''), r: 'Noise: ' + (x.n || 'No') + ', Sweating: ' + (x.w || 'No') + (String(x.r || '').trim() ? ' — ' + String(x.r).trim() : ''), tp: tp, n: x.n || 'No', w: x.w || 'No', rm: String(x.r || '').trim() });
+      } else {
+        var a = String(x.a || '').trim(), b = String(x.b || '').trim();
+        if (!a) empty++; if (r.type !== 'single' && !b) empty++;
+        items.push({ sr: r.sr, t: r.point + (r.instr ? ' — ' + r.instr : ''), s: a, r: b });
+      }
+    });
+    if (empty && !confirm(empty + ' entr' + (empty === 1 ? 'y is' : 'ies are') + ' empty. Submit anyway?')) return;
+    var d = { dkey: dlKey(date, shK, kind), form: kind === 'IT' ? 'IT' : shK, shift: shK, date: date, eq: dlEq(kind, shK), tag: '', loc: 'GHQ',
+      title: kind === 'IT' ? 'IT Room Temperature Logsheet' : 'GHQ CHECKLIST - ' + shK,
+      fields: [{ l: 'Shift', v: shK }, { l: 'Technician', v: session ? session.name : '' }, { l: 'Date', v: fmtDate(date, date) }, { l: 'Shift time', v: (SHIFTS.filter(function (z) { return z.k === shK; })[0] || {}).s + ' – ' + (SHIFTS.filter(function (z) { return z.k === shK; })[0] || {}).e }],
+      items: items, cols: kind === 'IT' ? { sr: 'Sr.', pt: 'Tag No', st: 'Temperature', rm: 'Defect (Noise / Sweating) / Remarks' } : { sr: 'Sr.', pt: 'Check Point', st: 'PRE Check Status / Remark', rm: 'POST Check Status / Remark' } };
+    if (resub) {
+      if (!navigator.onLine) { toast('Internet required to resubmit'); return; }
+      toast('Please wait…');
+      api('cl_resubmit', { id: resub, d: d }).then(function (r) {
+        if (!r.ok) throw new Error(r.error || 'error');
+        closeModal(); toast('✔ Resubmitted — sent to Supervisor for approval');
+        return pullChecklists().then(function () { renderDlog(); });
+      }).catch(function (e2) { toast('Error: ' + (e2 && e2.message || e2)); });
+      return;
+    }
+    commit('daily.log', d).then(function () { try { LS.del('ghq_dl_' + d.dkey); } catch (e) {} closeModal(); toast('✔ Submitted — sent to Supervisor for approval'); renderDlog(); });
   }
   /* ================= Daily Operations: Electrical / HVAC / Plumbing (PM today · Major work · Pending) ================= */
   var OPS = {
@@ -363,6 +496,7 @@
   function refreshUI() {
     try { renderGhqCards(); } catch (e) {}
     try { renderOps(); } catch (e) {}
+    try { renderDlog(); } catch (e) {}
     try { renderTickets(); } catch (e) {}
     try { renderAMCDashboard(); renderAMCMaster(); renderPPMSchedules(); } catch (e) {}
     try { calculateElecConsumption(); calculateWaterConsumption(); calculateBtuConsumption(); } catch (e) {}
@@ -395,8 +529,9 @@
     window.openModule = function (id, tab) {
       if ((id === 'screen-users' || id === 'screen-backup') && !(session && session.role === 'admin')) { toast('Admin only'); return; }
       om(id, tab);
-      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
+      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dlog': 'Daily Log', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
+      if (id === 'screen-dlog') { renderDlog(); pullDtpl(); pullChecklists().then(renderDlog); }
       if (id === 'screen-ppm') renderPPM();
       if (id === 'screen-electrical' || id === 'screen-hvac' || id === 'screen-plumbing') { try { renderOps(); } catch (e) {} }
       if (id === 'screen-roster') renderRoster();
@@ -449,7 +584,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -1372,7 +1507,9 @@
     modal('<div class="ghq-note">Loading…</div>');
     api('cl_get', { id: id }).then(function (r) {
       if (!r.ok) throw new Error(r.error || 'error');
-      var d = r.d || {}, e = ppmRows.filter(function (x) { return eqKey(x) === d.key; })[0] || { name: d.eq, tag: d.tag, loc: d.loc, freq: 'Monthly' };
+      var d = r.d || {};
+      if (d.dkey) { closeModal(); dlOpen(d.shift, d.form === 'IT' ? 'IT' : 'Shift', d.date, { resub: id, d: d, rem: r.rem }); return; }
+      var e = ppmRows.filter(function (x) { return eqKey(x) === d.key; })[0] || { name: d.eq, tag: d.tag, loc: d.loc, freq: 'Monthly' };
       var cached = LS.get('ghq_cl_' + (d.key || ''), null), opts = cached && cached.opts && cached.opts.length >= 2 ? cached.opts : ['OK', 'Not OK', 'NA'];
       (d.items || []).forEach(function (x) { if (!x.h && opts.indexOf(x.s) < 0) opts.push(x.s); });
       clCtx = { i: -1, e: e, title: d.title || '', items: d.items || [], fields: d.fields ? d.fields.map(function (f) { return { l: f.l }; }) : [], cols: d.cols || null, opts: opts, resub: id };
@@ -2187,11 +2324,11 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
-  injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
+  injectDailyLog(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
   idbOpen().then(qAll).then(function (q) {
     queue = q;
     if (NOT_CONFIGURED) { showLogin(''); return; }
