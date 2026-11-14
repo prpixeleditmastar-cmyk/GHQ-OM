@@ -796,7 +796,7 @@
     if (NOT_CONFIGURED) { e.textContent = 'No web app URL in config.js.'; return; }
     e.style.color = '#fbbf24'; e.textContent = 'Checking…';
     api('ping', {}, {}).then(function (r) {
-      e.textContent = r && r.pong ? (r.ready ? '✔ Server OK' : 'Server reachable, but setup was not run. Admin: run setup in Apps Script.') : 'Unexpected reply from server.';
+      e.textContent = r && r.pong ? (r.ready ? '✔ Server ' + (r.ver ? r.ver : 'OLD CODE (no version)') + ' · URL …' + String(API).slice(-14) : 'Server reachable, but setup was not run. Admin: run setup in Apps Script.') : 'Unexpected reply from server.';
     }).catch(function (x) {
       e.textContent = String(x && x.message) === 'BAD_REPLY'
         ? 'Server sent a web page instead of data. Admin: Deploy → Manage deployments → Who has access must be "Anyone", and use the latest version.'
@@ -1748,7 +1748,7 @@
       if (!r.ok) throw new Error(r.error || 'error');
       toast(r.ppmError ? 'Saved. PPM not added: ' + r.ppmError : '✔ Saved' + (r.ppm ? ' · added to PPM' : ''));
       closeModal(); return Promise.all([pullAssets(), r.ppm ? pullPpm() : null]).then(function () { renderAssets(); if (!id && r.id) astShow(r.id); });
-    }).catch(function (er) { toast(String(er && er.message) === 'Failed to fetch' ? 'Internet required' : /unknown action/.test(String(er && er.message)) ? String(er.message) + ' · app ' + VERSION.replace(/ · build.*/, '') : 'Error: ' + (er && er.message || er)); });
+    }).catch(function (er) { toast(String(er && er.message) === 'Failed to fetch' ? 'Internet required' : /unknown action/.test(String(er && er.message)) ? String(er.message) + ' · app ' + VERSION.replace(/ · build.*/, '') + ' · URL …' + String(API).slice(-14) : 'Error: ' + (er && er.message || er)); });
   }
   /* QR scan */
   function stopScan() { if (scanTimer) { clearInterval(scanTimer); scanTimer = null; } if (scanStream) { scanStream.getTracks().forEach(function (t) { t.stop(); }); scanStream = null; } }
