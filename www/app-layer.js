@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.1 · build ' + BUILD;
+  var VERSION = 'v8.2 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -875,8 +875,10 @@
   }
   function eqKey(e) { return (e.name + '|' + (e.loc || '')).toLowerCase(); }
   function ppmEval(e) {                              // a checklist counts as DONE only after the last approval; until then the equipment is "waiting"
-    var k = eqKey(e), dates = [], wait = '', lim = ymdOf(new Date(Date.now() - 3 * 864e5));
+    var k = eqKey(e), dates = [], wait = '', lim = ymdOf(new Date(Date.now() - 3 * 864e5)), cd = e.cdone || '';
+    if (cd) dates.push(cd);                                                // server says: approved up to this date
     (ppmLog[k] || []).forEach(function (d) {
+      if (cd && d <= cd) return;                                           // already approved (server state wins)
       var id = ppmLogId[k + '|' + d];
       if (!id) { dates.push(d); return; }                                  // simple "Mark done" (no checklist)
       var it = clItems.filter(function (x) { return x.id === id; })[0];
@@ -884,6 +886,7 @@
       else if (d >= lim) wait = wait || 'Pending Supervisor';              // just submitted, not synced yet
       else dates.push(d);                                                  // old entry outside the list = already approved
     });
+    if (!wait && e.cwait) wait = e.cwait;
     return { dates: dates, wait: wait };
   }
   function doneDates(e) { var a = ppmEval(e).dates.slice(); if (e.last) a.push(e.last); return a.sort(); }
@@ -930,16 +933,17 @@
     var box = $('ppm-day-list');
     if (!box) { box = document.createElement('div'); box.id = 'ppm-day-list'; box.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-top:10px'; ban.insertAdjacentElement('afterend', box); }
     var L = (ppmMonth || {})[selectedCalDay] || [], y = +$('cal-year-select').value, mo = +$('cal-month-select').value;
+    renderCatLists(); renderReports();
     if (!ppmRows.length) { box.innerHTML = '<div class="ghq-note">No equipment yet. ' + (canHold() ? 'Tap “Add equipment” above, or fill the PPM sheet in Google Sheets.' : 'Ask a Supervisor / Engineer to add equipment.') + '</div>'; return; }
     box.innerHTML = L.length ? L.map(function (t) { return ppmCard(t.i, t.e, t.kind, new Date(y, mo, selectedCalDay, 12)); }).join('') : '<div class="ghq-note">No PPM on this day.</div>';
   }
   function renderCatLists() {
     ['elec', 'hvac', 'plumb'].forEach(function (c) {
       var el = $('tab-ppm-' + c); if (!el) return;
-      var list = ppmRows.map(function (e, i) { return { e: e, i: i }; }).filter(function (x) { return x.e.cat === c; });
-      list.sort(function (a, b) { return nextDue(a.e) - nextDue(b.e); });
-      el.innerHTML = '<div class="section-title"><span>' + CATN[c] + ' PM Schedules</span><span style="font-size:0.72rem; color:var(--cyan)">' + list.length + ' equipment</span></div>' +
-        (list.length ? list.map(function (x) { return ppmCard(x.i, x.e, 'due', nextDue(x.e)); }).join('') : '<div class="ghq-note">No ' + CATN[c] + ' equipment yet.</div>');
+      var y = +$('cal-year-select').value, mo = +$('cal-month-select').value, dd = new Date(y, mo, selectedCalDay, 12);
+      var list = ((ppmMonth || {})[selectedCalDay] || []).filter(function (t) { return t.e.cat === c; });
+      el.innerHTML = '<div class="section-title"><span>' + CATN[c] + ' PM Schedules · ' + esc(fmtDate(ymdOf(dd), '')) + '</span><span style="font-size:0.72rem; color:var(--cyan)">' + list.length + ' equipment</span></div>' +
+        (list.length ? list.map(function (t) { return ppmCard(t.i, t.e, t.kind, dd); }).join('') : '<div class="ghq-note">No ' + CATN[c] + ' PPM on this date.</div>');
     });
   }
   function injectPpmAdd() {
@@ -1106,14 +1110,17 @@
     var box = $('ppm-reports'), scr = $('screen-ppm');
     if (!scr || !canDownload()) { if (box) box.remove(); return; }
     if (!box) { box = document.createElement('div'); box.id = 'ppm-reports'; box.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-top:14px'; scr.appendChild(box); }
-    box.innerHTML = '<div class="section-title"><span>Approved checklists (PDF)</span><span style="font-size:0.72rem; color:var(--cyan)">' + ppmReports.length + '</span></div>' +
-      (ppmReports.length ? ppmReports.map(function (r) {
+    var selY = $('cal-year-select') ? +$('cal-year-select').value : 0, selM = $('cal-month-select') ? +$('cal-month-select').value : 0;
+    var selK = selY ? selY + '-' + p2(selM + 1) + '-' + p2(selectedCalDay) : '';
+    var rl = selK ? ppmReports.filter(function (r) { return String(r.date).slice(0, 10) === selK; }) : ppmReports;
+    box.innerHTML = '<div class="section-title"><span>Approved checklists (PDF)' + (selK ? ' · ' + esc(fmtDate(selK, '')) : '') + '</span><span style="font-size:0.72rem; color:var(--cyan)">' + rl.length + '</span></div>' +
+      (rl.length ? rl.map(function (r) {
         return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">PDF</span><span style="font-size:.72rem;color:var(--text-muted)">' + esc(fmtDate(r.date, r.date)) + '</span></div>' +
           '<div class="op-item-title">' + (r.no ? '<span style="color:var(--gold-light);font-size:.74rem">' + esc(r.no) + '</span><br>' : '') + esc(r.eq) + (r.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(r.tag) + ']</span>' : '') + '</div>' +
           '<div class="op-item-desc">By ' + esc(r.user) + ' · ' + (Number(r.bad) ? '<span style="color:#f87171">' + r.bad + ' NOT OK</span>' : 'All OK') + '</div>' +
           '<div class="op-item-foot"><a href="' + esc(r.url) + '" target="_blank" rel="noopener" style="color:var(--gold-light);font-size:.75rem">Open in Drive</a>' +
           '<button class="btn-gold-solid" onclick="GHQ.ppmPdf(\'' + esc(r.id) + '\')">Download PDF</button></div></div>';
-      }).join('') : '<div class="ghq-note">PDFs appear here after the last approval (Supervisor → Engineer → PM / APM).</div>');
+      }).join('') : '<div class="ghq-note">No approved checklist PDF for this date.</div>');
   }
   function ppmPdf(id) {
     if (!canDownload()) { toast('Download is for Admin / Engineer / RIL / PM / APM'); return; }
@@ -1954,7 +1961,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
