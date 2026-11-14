@@ -1118,8 +1118,8 @@
         return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">PDF</span><span style="font-size:.72rem;color:var(--text-muted)">' + esc(fmtDate(r.date, r.date)) + '</span></div>' +
           '<div class="op-item-title">' + (r.no ? '<span style="color:var(--gold-light);font-size:.74rem">' + esc(r.no) + '</span><br>' : '') + esc(r.eq) + (r.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(r.tag) + ']</span>' : '') + '</div>' +
           '<div class="op-item-desc">By ' + esc(r.user) + ' · ' + (Number(r.bad) ? '<span style="color:#f87171">' + r.bad + ' NOT OK</span>' : 'All OK') + '</div>' +
-          '<div class="op-item-foot"><a href="' + esc(r.url) + '" target="_blank" rel="noopener" style="color:var(--gold-light);font-size:.75rem">Open in Drive</a>' +
-          '<button class="btn-gold-solid" onclick="GHQ.ppmPdf(\'' + esc(r.id) + '\')">Download PDF</button></div></div>';
+          (r.id ? '<div class="op-item-foot"><a href="' + esc(r.url) + '" target="_blank" rel="noopener" style="color:var(--gold-light);font-size:.75rem">Open in Drive</a>' +
+          '<button class="btn-gold-solid" onclick="GHQ.ppmPdf(\'' + esc(r.id) + '\')">Download PDF</button></div></div>' : '<div class="op-item-desc" style="color:#f87171">PDF not ready' + (r.err ? ': ' + esc(r.err) : '') + ' — will retry on next refresh</div></div>');
       }).join('') : '<div class="ghq-note">No approved checklist PDF for this date.</div>');
   }
   function ppmPdf(id) {
@@ -1189,7 +1189,7 @@
       if (!r.ok) throw new Error(r.error || 'error');
       closeModal();
       toast(r.status === 'Approved' ? '✔ Approved — final PDF created' : r.status === 'Rejected' ? 'Checklist rejected' : '✔ Approved — sent to ' + clWaiting(r.status));
-      return pullChecklists().then(pullReports);
+      return pullChecklists().then(pullPpm).then(pullReports).then(function () { renderPPM(); });
     }).catch(function (e) { toast(String(e && e.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + (e && e.message || e)); });
   }
   function updateBell() {
