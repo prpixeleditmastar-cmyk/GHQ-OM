@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8 · build ' + BUILD;
+  var VERSION = 'v8.1 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -72,7 +72,7 @@
   var feederRows = LS.get('ghq_feeders', null);  // master list from the 'Feeders' sheet (cached for offline)
   if (feederRows && !feederRows.length) feederRows = null;
   var layoutSig = '';
-  var ppmRows = LS.get('ghq_ppm', []), ppmLog = {}, clItems = LS.get('ghq_cl_items', []), clRej = {}, dgItems = LS.get('ghq_dg_items', []), dgCanStart = false;
+  var ppmRows = LS.get('ghq_ppm', []), ppmLog = {}, ppmLogId = {}, clItems = LS.get('ghq_cl_items', []), clRej = {}, dgItems = LS.get('ghq_dg_items', []), dgCanStart = false;
   var roster = {}, rosterPdf = {}, shiftsInfo = LS.get('ghq_shifts', []);
   var syncing = false, lastErr = '', timer = null;
 
@@ -100,7 +100,7 @@
     resetObj(elecData, BASE.elec, 'elec'); resetObj(waterData, BASE.water, 'water'); resetObj(btuData, BASE.btu, 'btu');
     if (CFG.KEEP_DEMO_TICKETS) resetArr(ticketDatabase, BASE.tickets); else ticketDatabase.length = 0;
     resetArr(amcMasterDatabase, BASE.amc); resetArr(amcPPMSchedules, BASE.ppm);
-    ppmLog = {}; roster = {}; rosterPdf = {};
+    ppmLog = {}; ppmLogId = {}; roster = {}; rosterPdf = {};
   }
 
   /* ---------- event replay ---------- */
@@ -132,7 +132,7 @@
       amcMasterDatabase.unshift(clone(d.amc));
       if (d.ppm) amcPPMSchedules.unshift(clone(d.ppm));
     } else if (ev.type === 'ppm.checklist') {
-      (ppmLog[d.key] = ppmLog[d.key] || []).push(d.date);
+      (ppmLog[d.key] = ppmLog[d.key] || []).push(d.date); ppmLogId[d.key + '|' + d.date] = ev.id;
     } else if (ev.type === 'roster.set') {
       roster[d.month] = { people: d.people || [] };
     } else if (ev.type === 'roster.pdf') {
@@ -874,7 +874,19 @@
     x.setDate(Math.min(day, new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate())); return x;
   }
   function eqKey(e) { return (e.name + '|' + (e.loc || '')).toLowerCase(); }
-  function doneDates(e) { var k = eqKey(e), a = (ppmLog[k] || []).filter(function (d) { return !clRej[k + '|' + d]; }); if (e.last) a.push(e.last); return a.sort(); }   // a rejected checklist does not count as done
+  function ppmEval(e) {                              // a checklist counts as DONE only after the last approval; until then the equipment is "waiting"
+    var k = eqKey(e), dates = [], wait = '', lim = ymdOf(new Date(Date.now() - 3 * 864e5));
+    (ppmLog[k] || []).forEach(function (d) {
+      var id = ppmLogId[k + '|' + d];
+      if (!id) { dates.push(d); return; }                                  // simple "Mark done" (no checklist)
+      var it = clItems.filter(function (x) { return x.id === id; })[0];
+      if (it) { if (it.status === 'Approved') dates.push(d); else if (it.status !== 'Rejected') wait = it.status; }
+      else if (d >= lim) wait = wait || 'Pending Supervisor';              // just submitted, not synced yet
+      else dates.push(d);                                                  // old entry outside the list = already approved
+    });
+    return { dates: dates, wait: wait };
+  }
+  function doneDates(e) { var a = ppmEval(e).dates.slice(); if (e.last) a.push(e.last); return a.sort(); }
   function lastDone(e) { var a = doneDates(e); return a.length ? a[a.length - 1] : ''; }
   function nextDue(e) { var l = lastDone(e); return l ? addPeriod(parseYmd(l), e.freq) : parseYmd(ymdOf(new Date())); }
   function monthTasks(y, mo) {                         // {day: [{i, e, kind:'due'|'done'}]}
@@ -905,10 +917,12 @@
       st = diff < 0 ? '<span style="font-size:.72rem;color:#f87171">Overdue ' + (-diff) + ' day' + (diff === -1 ? '' : 's') + ' · ' + fmtDate(ymdOf(dueD), '') + '</span>'
         : '<span style="font-size:.72rem;color:var(--gold-light)">Due: ' + (diff === 0 ? 'Today' : diff === 1 ? 'Tomorrow' : 'in ' + diff + ' days') + ' · ' + fmtDate(ymdOf(dueD), '') + '</span>';
     }
+    var wt = kind !== 'done' && dueD <= today ? ppmEval(e).wait : '';
+    if (wt) st = '<span style="font-size:.72rem;color:var(--gold-light)">⏳ Waiting for ' + esc(clWaiting(wt)) + ' approval</span>';
     return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(e.freq) + ' PM</span>' + st + '</div>' +
       '<div class="op-item-title">' + esc(e.name) + (e.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(e.tag) + ']</span>' : '') + '</div><div class="op-item-desc">' + esc(e.loc || '') + '</div>' +
       '<div class="op-item-foot"><span><i class="fa-solid fa-user-gear"></i> ' + esc(e.team || '—') + '</span>' +
-      (kind === 'done' ? '' : (dueD - today) / 864e5 > 0.5 ? '<button class="btn-gold-solid" disabled style="opacity:.45">Opens on ' + esc(fmtDate(ymdOf(dueD), '')) + '</button>'
+      (kind === 'done' || wt ? '' : (dueD - today) / 864e5 > 0.5 ? '<button class="btn-gold-solid" disabled style="opacity:.45">Opens on ' + esc(fmtDate(ymdOf(dueD), '')) + '</button>'
         : '<button class="btn-gold-solid" onclick="GHQ.ppmOpen(' + i + ')">' + (e.hasCl || (e.check && e.check.length) ? 'Open checklist' : 'Mark done') + '</button>') + '</div></div>';
   }
   function renderDayList() {
@@ -1008,6 +1022,7 @@
   }
   function ppmOpen(i) {
     var e = ppmRows[i]; if (!e) return;
+    if (ppmEval(e).wait) { toast('Checklist submitted — waiting for approval'); return; }
     if (nextDue(e) - parseYmd(ymdOf(new Date())) > 36e5) { toast('This checklist opens on ' + fmtDate(ymdOf(nextDue(e)), '')); return; }
     var ck = 'ghq_cl_' + eqKey(e), local = (e.check || []).map(function (t) { return { t: t }; });
     function show(r) { clShow(i, r); }
@@ -1588,6 +1603,7 @@
     ['assets-category-view', 'assets-sheet-view'].forEach(function (id) { var e = $(id); if (e) e.style.display = 'none'; });
     var root = $('ast-root'); if (!root) { root = document.createElement('div'); root.id = 'ast-root'; root.style.cssText = 'display:flex;flex-direction:column;gap:10px'; scr.appendChild(root); }
     var h = '<div class="ghq-grid2"><button class="ghq-btn" onclick="GHQ.astScan()"><i class="fa-solid fa-qrcode"></i> Scan QR</button>' + (assets.canEdit || canHold() ? '<button class="ghq-btn ghost" onclick="GHQ.astForm()"><i class="fa-solid fa-plus"></i> Add equipment</button>' : '<span></span>') + '</div>';
+    if (canAdmin() && !astCat) h += '<button class="ghq-btn ghost" onclick="GHQ.astImport()">Import old equipment from PPM sheet (Admin)</button>';
     h += '<input class="ghq-input" placeholder="Search tag, name, location, ID…" value="' + esc(astQ) + '" oninput="GHQ.astSearch(this.value)">';
     if (!astCat && !astQ) {
       h += '<div class="section-title"><span>Asset categories</span><span style="font-size:.72rem;color:var(--gold-primary)">' + assets.items.length + ' equipment</span></div>';
@@ -1605,6 +1621,12 @@
     root.innerHTML = h;
   }
   function astSearch(v) { astQ = v; var root = $('ast-root'), pos = root && root.querySelector('input.ghq-input'); renderAssets(); var i = $('ast-root').querySelector('input.ghq-input'); if (i) { i.focus(); try { i.setSelectionRange(v.length, v.length); } catch (e) {} } }
+  function astImport() {
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    if (!confirm('Copy all equipment from the PPM sheet into Assets? Existing ones are skipped.')) return;
+    toast('Importing…');
+    api('asset_import').then(function (r) { if (!r.ok) throw new Error(r.error || 'error'); toast('✔ ' + r.added + ' added, ' + r.skipped + ' already there'); return pullAssets(); }).then(renderAssets).catch(function (e) { toast('Error: ' + (e && e.message || e)); });
+  }
   function astOpen(c) { astCat = c; astQ = ''; renderAssets(); }
   /* QR */
   function qrCanvas(text, px) {
@@ -1670,12 +1692,12 @@
       '<div class="ghq-grid2"><div>' + f('serial', 'Serial no.', e.serial) + '</div><div>' + f('cap', 'Capacity / rating', e.cap, 'e.g. 500 TR') + '</div></div>' + f('loc', 'Location', e.loc, 'e.g. Office Tower / L-11') +
       '<div class="ghq-grid2"><div>' + f('inst', 'Installed on', e.inst, '', 'date') + '</div><div><label class="ghq-lbl">Status</label><select id="af-status" class="cal-select" style="width:100%">' + AST_STATUS.map(function (s) { return '<option' + (s === e.status ? ' selected' : '') + '>' + s + '</option>'; }).join('') + '</select></div></div>' +
       f('vendor', 'Vendor / AMC', e.vendor) + f('rem', 'Remarks', e.rem) +
-      '<div class="sub-section-header" style="margin-top:10px">Add to PPM schedule (optional — Electrical / HVAC / Plumbing)</div><div class="ghq-grid2"><div><label class="ghq-lbl">PPM frequency</label><select id="af-pf" class="cal-select" style="width:100%"><option value="">No PPM</option><option>Weekly</option><option>Fortnightly</option><option>Monthly</option><option>Quarterly</option><option>Half-yearly</option><option>Yearly</option></select></div><div>' + f('pl', 'Last PPM done', '', '', 'date') + '</div></div>' + f('pt', 'PPM team / vendor', '') + f('plink', 'Checklist Google Sheet link or name', '') +
+      '<div class="sub-section-header" style="margin-top:10px">Add to PPM schedule (optional — Electrical / HVAC / Plumbing)</div><div class="ghq-grid2"><div><label class="ghq-lbl">PPM frequency</label><select id="af-pf" class="cal-select" style="width:100%"><option value="">No PPM</option><option>Weekly</option><option>Fortnightly</option><option>Monthly</option><option>Quarterly</option><option>Half-yearly</option><option>Yearly</option></select></div><div>' + f('pl', 'Last PPM done', '', '', 'date') + '</div></div>' + f('pt', 'PPM team / vendor', '') + (canAdmin() ? f('plink', 'Checklist Google Sheet link or name (Admin only)', '') : '') +
       '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" onclick="GHQ.astSave(' + (a ? '\'' + esc(a.id) + '\'' : '') + ')">Save</button></div>';
     modal(h);
   }
   function astSave(id) {
-    var g = function (k) { return ($('af-' + k) || {}).value || ''; }, e = { cat: g('cat'), name: g('name').trim(), tag: g('tag').trim(), make: g('make').trim(), model: g('model').trim(), serial: g('serial').trim(), cap: g('cap').trim(), loc: g('loc').trim(), inst: g('inst'), vendor: g('vendor').trim(), status: g('status'), rem: g('rem').trim(), ppmFreq: g('pf'), ppmLast: g('pl'), team: g('pt').trim(), link: g('plink').trim() };
+    var g = function (k) { return ($('af-' + k) || {}).value || ''; }, e = { cat: g('cat'), name: g('name').trim(), tag: g('tag').trim(), make: g('make').trim(), model: g('model').trim(), serial: g('serial').trim(), cap: g('cap').trim(), loc: g('loc').trim(), inst: g('inst'), vendor: g('vendor').trim(), status: g('status'), rem: g('rem').trim(), ppmFreq: g('pf'), ppmLast: g('pl'), team: g('pt').trim(), link: canAdmin() ? g('plink').trim() : '' };
     if (!e.name) { toast('Enter the equipment name'); return; }
     if (!navigator.onLine) { toast('Internet required'); return; }
     api(id ? 'asset_update' : 'asset_add', id ? { id: id, e: e } : { e: e }).then(function (r) {
@@ -1932,7 +1954,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
