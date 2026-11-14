@@ -174,7 +174,41 @@
     try { initAllReadings(); } catch (e) {}
     fillPanelList();
   }
+  /* Dashboard › Daily Consumption › GHQ Facility: live numbers from the latest meter readings */
+  var GHQ_CARDS = [
+    { u: 'kWh', d: 1, data: function () { return elecData; }, m: [['mltp1', 'tr16ic'], ['mltp2', 'tr17ic'], ['mltp3', 'tr18ic']] },
+    { u: 'kL Domestic', d: 1, data: function () { return waterData; }, m: [['watermeter', 'dwsl04ghq']] },
+    { u: 'kL Flushing', d: 1, data: function () { return waterData; }, m: [['watermeter', 'fwsl04ghq']] },
+    { u: 'MWH', d: 1, data: function () { return btuData; }, m: [['ghqbtu', 'ghqbtu']] }
+  ];
+  function nz(x) { return String(x || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+  function findMeter(data, pn, fn) {
+    var best = null;
+    Object.keys(data).forEach(function (p) {
+      (data[p] || []).forEach(function (f) {
+        var a = nz(f.name); if (a.indexOf(fn) < 0) return;
+        var score = nz(p).indexOf(pn) >= 0 ? 2 : 1;
+        if (!best || score > best.s) best = { s: score, f: f };
+      });
+    });
+    return best && best.f;
+  }
+  function renderGhqCards() {
+    var hdr = Array.prototype.filter.call(document.querySelectorAll('.sub-section-header'), function (h) { return /GHQ Facility/i.test(h.textContent) && !/O&M/i.test(h.textContent); })[0];
+    if (!hdr) return;
+    var vals = hdr.parentNode.querySelectorAll('.metric-card'); if (vals.length < 4) return;
+    GHQ_CARDS.forEach(function (c, i) {
+      var card = vals[i], v = card.querySelector('.metric-val'), sub = card.querySelector('.metric-sub'), sum = 0, got = 0, oldest = '';
+      c.m.forEach(function (m) {
+        var f = findMeter(c.data(), m[0], m[1]);
+        if (f && f.lastAt && !f._first) { sum += Number(f.yesterday) || 0; got++; var dt = String(f.lastAt).slice(0, 10); if (!oldest || dt < oldest) oldest = dt; }
+      });
+      v.textContent = got ? (i === 0 ? Math.round(sum).toLocaleString() : (Math.round(sum * 10) / 10).toLocaleString(undefined, { minimumFractionDigits: 1 })) : '—';
+      sub.textContent = c.u + (got ? ' · ' + fmtDate(oldest, oldest) : ' · no reading yet') + (got && got < c.m.length ? ' (' + got + '/' + c.m.length + ' meters)' : '');
+    });
+  }
   function refreshUI() {
+    try { renderGhqCards(); } catch (e) {}
     try { renderTickets(); } catch (e) {}
     try { renderAMCDashboard(); renderAMCMaster(); renderPPMSchedules(); } catch (e) {}
     try { calculateElecConsumption(); calculateWaterConsumption(); calculateBtuConsumption(); } catch (e) {}
@@ -1998,7 +2032,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
