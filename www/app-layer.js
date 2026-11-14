@@ -1648,7 +1648,6 @@
     ['assets-category-view', 'assets-sheet-view'].forEach(function (id) { var e = $(id); if (e) e.style.display = 'none'; });
     var root = $('ast-root'); if (!root) { root = document.createElement('div'); root.id = 'ast-root'; root.style.cssText = 'display:flex;flex-direction:column;gap:10px'; scr.appendChild(root); }
     var h = '<div class="ghq-grid2"><button class="ghq-btn" onclick="GHQ.astScan()"><i class="fa-solid fa-qrcode"></i> Scan QR</button>' + (assets.canEdit || canHold() ? '<button class="ghq-btn ghost" onclick="GHQ.astForm()"><i class="fa-solid fa-plus"></i> Add equipment</button>' : '<span></span>') + '</div>';
-    if (canAdmin() && !astCat) h += '<button class="ghq-btn ghost" onclick="GHQ.astImport()">Import old equipment from PPM sheet (Admin)</button>';
     h += '<input class="ghq-input" placeholder="Search tag, name, location, ID…" value="' + esc(astQ) + '" oninput="GHQ.astSearch(this.value)">';
     if (!astCat && !astQ) {
       h += '<div class="section-title"><span>Asset categories</span><span style="font-size:.72rem;color:var(--gold-primary)">' + assets.items.length + ' equipment</span></div>';
@@ -1749,7 +1748,7 @@
       if (!r.ok) throw new Error(r.error || 'error');
       toast(r.ppmError ? 'Saved. PPM not added: ' + r.ppmError : '✔ Saved' + (r.ppm ? ' · added to PPM' : ''));
       closeModal(); return Promise.all([pullAssets(), r.ppm ? pullPpm() : null]).then(function () { renderAssets(); if (!id && r.id) astShow(r.id); });
-    }).catch(function (er) { toast(String(er && er.message) === 'Failed to fetch' ? 'Internet required' : 'Error: ' + (er && er.message || er)); });
+    }).catch(function (er) { toast(String(er && er.message) === 'Failed to fetch' ? 'Internet required' : String(er && er.message) === 'unknown action' ? 'Server is not updated — deploy the latest Code.gs as a New version' : 'Error: ' + (er && er.message || er)); });
   }
   /* QR scan */
   function stopScan() { if (scanTimer) { clearInterval(scanTimer); scanTimer = null; } if (scanStream) { scanStream.getTracks().forEach(function (t) { t.stop(); }); scanStream = null; } }
