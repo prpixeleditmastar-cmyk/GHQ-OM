@@ -175,12 +175,6 @@
     fillPanelList();
   }
   /* Dashboard › Daily Consumption › GHQ Facility: live numbers from the latest meter readings */
-  var GHQ_CARDS = [
-    { u: 'kWh', d: 1, data: function () { return elecData; }, m: [['mltp1', 'tr16ic'], ['mltp2', 'tr17ic'], ['mltp3', 'tr18ic']] },
-    { u: 'kL Domestic', d: 1, data: function () { return waterData; }, m: [['watermeter', 'dwsl04ghq']] },
-    { u: 'kL Flushing', d: 1, data: function () { return waterData; }, m: [['watermeter', 'fwsl04ghq']] },
-    { u: 'MWH', d: 1, data: function () { return btuData; }, m: [['ghqbtu', 'ghqbtu']] }
-  ];
   function nz(x) { return String(x || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
   function findMeter(data, pn, fn) {
     var best = null;
@@ -193,19 +187,46 @@
     });
     return best && best.f;
   }
-  function renderGhqCards() {
-    var hdr = Array.prototype.filter.call(document.querySelectorAll('.sub-section-header'), function (h) { return /GHQ Facility/i.test(h.textContent) && !/O&M/i.test(h.textContent); })[0];
+  function paintCards(hdrRe, notRe, cards) {
+    var hdr = Array.prototype.filter.call(document.querySelectorAll('.sub-section-header'), function (h) { return hdrRe.test(h.textContent) && !(notRe && notRe.test(h.textContent)); })[0];
     if (!hdr) return;
     var vals = hdr.parentNode.querySelectorAll('.metric-card'); if (vals.length < 4) return;
-    GHQ_CARDS.forEach(function (c, i) {
-      var card = vals[i], v = card.querySelector('.metric-val'), sub = card.querySelector('.metric-sub'), sum = 0, got = 0, oldest = '';
-      c.m.forEach(function (m) {
-        var f = findMeter(c.data(), m[0], m[1]);
+    cards.forEach(function (c, i) {
+      var card = vals[i], v = card.querySelector('.metric-val'), sub = card.querySelector('.metric-sub'), sum = 0, got = 0, oldest = '', want = 0;
+      c.m().forEach(function (f) {
+        want++;
         if (f && f.lastAt && !f._first) { sum += Number(f.yesterday) || 0; got++; var dt = String(f.lastAt).slice(0, 10); if (!oldest || dt < oldest) oldest = dt; }
       });
-      v.textContent = got ? (i === 0 ? Math.round(sum).toLocaleString() : (Math.round(sum * 10) / 10).toLocaleString(undefined, { minimumFractionDigits: 1 })) : '—';
-      sub.textContent = c.u + (got ? ' · ' + fmtDate(oldest, oldest) : ' · no reading yet') + (got && got < c.m.length ? ' (' + got + '/' + c.m.length + ' meters)' : '');
+      v.textContent = got ? (c.u === 'kWh' ? Math.round(sum).toLocaleString() : (Math.round(sum * 10) / 10).toLocaleString(undefined, { minimumFractionDigits: 1 })) : '—';
+      sub.textContent = c.u + (got ? ' · ' + fmtDate(oldest, oldest) : ' · no reading yet') + (got && got < want ? ' (' + got + '/' + want + ' meters)' : '');
     });
+  }
+  function pick(dataFn, specs) {                       // GHQ: one named meter per spec [panelPart, feederPart]
+    return function () { return specs.map(function (m) { return findMeter(dataFn(), m[0], m[1]); }); };
+  }
+  function pickSet(dataFn, panels, feeders) {          // NMAEYC: exact panel names; all feeders (feeders=null) or the named ones
+    return function () {
+      var out = [], data = dataFn();
+      Object.keys(data).forEach(function (p) {
+        if (panels.indexOf(nz(p)) < 0) return;
+        (data[p] || []).forEach(function (f) { if (!feeders || feeders.indexOf(nz(f.name)) >= 0) out.push(f); });
+      });
+      return out;
+    };
+  }
+  function renderGhqCards() {
+    paintCards(/GHQ Facility/i, /O&M/i, [
+      { u: 'kWh', m: pick(function () { return elecData; }, [['mltp1', 'tr16ic'], ['mltp2', 'tr17ic'], ['mltp3', 'tr18ic']]) },
+      { u: 'kL Domestic', m: pick(function () { return waterData; }, [['watermeter', 'dwsl04ghq']]) },
+      { u: 'kL Flushing', m: pick(function () { return waterData; }, [['watermeter', 'fwsl04ghq']]) },
+      { u: 'MWH', m: pick(function () { return btuData; }, [['ghqbtu', 'ghqbtu']]) }
+    ]);
+    paintCards(/NMAEYC/i, null, [
+      { u: 'kWh', m: pickSet(function () { return elecData; }, ['nmaeycele', 'nmaeyceleelevator'], null) },
+      { u: 'kL Domestic', m: pickSet(function () { return waterData; }, ['nmaeycwater'], ['dwsl04nzone', 'dwsl05nzone', 'dwsl05mzone']) },
+      { u: 'kL Flushing', m: pickSet(function () { return waterData; }, ['nmaeycwater'], ['fwsl05nzone', 'fwsl05mzone']) },
+      { u: 'MWH', m: pickSet(function () { return btuData; }, ['nmaeycelebtu'], ['btumeter1', 'btumeter2', 'btumeter3']) }
+    ]);
   }
   function refreshUI() {
     try { renderGhqCards(); } catch (e) {}
