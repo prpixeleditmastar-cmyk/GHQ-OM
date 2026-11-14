@@ -874,19 +874,24 @@
     x.setDate(Math.min(day, new Date(x.getFullYear(), x.getMonth() + 1, 0).getDate())); return x;
   }
   function eqKey(e) { return (e.name + '|' + (e.loc || '')).toLowerCase(); }
-  function ppmEval(e) {                              // a checklist counts as DONE only after the last approval; until then the equipment is "waiting"
-    var k = eqKey(e), dates = [], wait = '', lim = ymdOf(new Date(Date.now() - 3 * 864e5)), cd = e.cdone || '';
-    if (cd) dates.push(cd);                                                // server says: approved up to this date
+  function ppmEval(e) {                              // DONE only after the last approval; until then "waiting". Source: checklist list (all devices) + server state + own unsynced entries
+    var k = eqKey(e), dates = [], pend = [], lim = ymdOf(new Date(Date.now() - 3 * 864e5)), seen = {};
+    if (e.cdone) dates.push(e.cdone);
+    clItems.forEach(function (x) {
+      if (((x.eq || '') + '|' + (x.loc || '')).toLowerCase() !== k) return;
+      seen[x.id] = 1;
+      if (x.status === 'Approved') dates.push(x.date); else if (x.status !== 'Rejected') pend.push({ d: x.date, s: x.status });
+    });
     (ppmLog[k] || []).forEach(function (d) {
-      if (cd && d <= cd) return;                                           // already approved (server state wins)
       var id = ppmLogId[k + '|' + d];
       if (!id) { dates.push(d); return; }                                  // simple "Mark done" (no checklist)
-      var it = clItems.filter(function (x) { return x.id === id; })[0];
-      if (it) { if (it.status === 'Approved') dates.push(d); else if (it.status !== 'Rejected') wait = it.status; }
-      else if (d >= lim) wait = wait || 'Pending Supervisor';              // just submitted, not synced yet
+      if (seen[id]) return;
+      if (d >= lim) pend.push({ d: d, s: 'Pending Supervisor' });          // just submitted, not synced yet
       else dates.push(d);                                                  // old entry outside the list = already approved
     });
-    if (!wait && e.cwait) wait = e.cwait;
+    dates.sort(); var mx = dates.length ? dates[dates.length - 1] : '', wait = '', wd = '';
+    pend.forEach(function (x) { if (x.d > mx && x.d >= wd) { wait = x.s; wd = x.d; } });
+    if (!wait && e.cwait && (!mx || (e.cdone || '') >= mx)) wait = e.cwait;
     return { dates: dates, wait: wait };
   }
   function doneDates(e) { var a = ppmEval(e).dates.slice(); if (e.last) a.push(e.last); return a.sort(); }
@@ -899,7 +904,8 @@
       var seenD = {};
       doneDates(e).forEach(function (k) { var d = parseYmd(k); if (d >= from && d <= to && !seenD[k]) { seenD[k] = 1; put(d.getDate(), i, e, 'done'); } });
       var d = nextDue(e), g = 0;
-      while (d <= to && g++ < 500) { if (d >= from) put(d.getDate(), i, e, 'due'); d = addPeriod(d, e.freq); }
+      var wt = ppmEval(e).wait, tdy = parseYmd(ymdOf(new Date()));
+      while (d <= to && g++ < 500) { if (d >= from) put(d.getDate(), i, e, wt && d <= tdy ? 'wait' : 'due'); d = addPeriod(d, e.freq); }
     });
     return out;
   }
@@ -907,9 +913,9 @@
     Object.keys(scheduledTasks).forEach(function (k) { delete scheduledTasks[k]; });
     ppmMonth = monthTasks(y, mo);
     Object.keys(ppmMonth).forEach(function (day) {
-      var L = ppmMonth[day], due = L.filter(function (t) { return t.kind === 'due'; }).length, done = L.length - due;
+      var L = ppmMonth[day], due = L.filter(function (t) { return t.kind === 'due'; }).length, wtn = L.filter(function (t) { return t.kind === 'wait'; }).length, done = L.length - due - wtn;
       var has = function (c) { return L.some(function (t) { return t.e.cat === c; }); };
-      scheduledTasks[day] = { count: due ? due + (due > 1 ? ' Tasks' : ' Task') + ' Due' + (done ? ' · ' + done + ' Done' : '') : done + ' Done', elec: has('elec'), hvac: has('hvac'), plumb: has('plumb') };
+      scheduledTasks[day] = { count: due ? due + (due > 1 ? ' Tasks' : ' Task') + ' Due' + (done ? ' · ' + done + ' Done' : '') + (wtn ? ' · ' + wtn + ' Waiting' : '') : wtn ? wtn + ' Waiting' + (done ? ' · ' + done + ' Done' : '') : done + ' Done', elec: has('elec'), hvac: has('hvac'), plumb: has('plumb') };
     });
   }
   function ppmCard(i, e, kind, dueD) {
@@ -920,7 +926,7 @@
       st = diff < 0 ? '<span style="font-size:.72rem;color:#f87171">Overdue ' + (-diff) + ' day' + (diff === -1 ? '' : 's') + ' · ' + fmtDate(ymdOf(dueD), '') + '</span>'
         : '<span style="font-size:.72rem;color:var(--gold-light)">Due: ' + (diff === 0 ? 'Today' : diff === 1 ? 'Tomorrow' : 'in ' + diff + ' days') + ' · ' + fmtDate(ymdOf(dueD), '') + '</span>';
     }
-    var wt = kind !== 'done' && dueD <= today ? ppmEval(e).wait : '';
+    var wt = kind !== 'done' && dueD <= today ? (ppmEval(e).wait || (kind === 'wait' ? 'Pending Supervisor' : '')) : '';
     if (wt) st = '<span style="font-size:.72rem;color:var(--gold-light)">⏳ Waiting for ' + esc(clWaiting(wt)) + ' approval</span>';
     return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(e.freq) + ' PM</span>' + st + '</div>' +
       '<div class="op-item-title">' + esc(e.name) + (e.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(e.tag) + ']</span>' : '') + '</div><div class="op-item-desc">' + esc(e.loc || '') + '</div>' +
@@ -961,7 +967,7 @@
   }
   window.updateMonthlyTotals = function (month, year) {
     var mt = ppmMonth || monthTasks(year, month), c = { elec: [0, 0], hvac: [0, 0], plumb: [0, 0] }, tot = 0;
-    Object.keys(mt).forEach(function (d) { mt[d].forEach(function (t) { c[t.e.cat][t.kind === 'done' ? 0 : 1]++; tot++; }); });
+    Object.keys(mt).forEach(function (d) { mt[d].forEach(function (t) { if (t.kind === 'wait') { tot++; return; } c[t.e.cat][t.kind === 'done' ? 0 : 1]++; tot++; }); });
     function set(id, v) { var el = $(id); if (el) el.textContent = v; }
     set('total-monthly-ppm', tot + (tot === 1 ? ' Task' : ' Tasks'));
     Object.keys(c).forEach(function (k) { set('total-' + k + '-ppm', c[k][0] + c[k][1]); set('comp-' + k + '-ppm', c[k][0]); set('pend-' + k + '-ppm', c[k][1]); });
