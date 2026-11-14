@@ -96,11 +96,12 @@
     });
   }
   function resetArr(target, src) { target.length = 0; clone(src).forEach(function (x) { target.push(x); }); }
+  var majorList = [];
   function resetState() {
     resetObj(elecData, BASE.elec, 'elec'); resetObj(waterData, BASE.water, 'water'); resetObj(btuData, BASE.btu, 'btu');
     if (CFG.KEEP_DEMO_TICKETS) resetArr(ticketDatabase, BASE.tickets); else ticketDatabase.length = 0;
     resetArr(amcMasterDatabase, BASE.amc); resetArr(amcPPMSchedules, BASE.ppm);
-    ppmLog = {}; ppmLogId = {}; roster = {}; rosterPdf = {};
+    ppmLog = {}; ppmLogId = {}; roster = {}; rosterPdf = {}; majorList.length = 0;
   }
 
   /* ---------- event replay ---------- */
@@ -117,6 +118,11 @@
       var f = list.filter(function (x) { return x.name === d.feeder; })[0];
       if (!f) return;
       f.prevReading = d.value; f.yesterday = d.consumption || 0; f._first = false; f.lastBy = ev.user; f.lastAt = ev.ts;
+    } else if (ev.type === 'major.add' && d.id) {
+      var mw = clone(d); mw.status = 'open'; mw.by = ev.user; mw.ts = ev.ts; majorList.push(mw);
+    } else if (ev.type === 'major.done') {
+      var mj = majorList.filter(function (x) { return x.id === d.id; })[0]; if (!mj) return;
+      mj.status = 'done'; mj.end = d.end; mj.material = d.material || ''; mj.doneBy = ev.user;
     } else if (ev.type === 'ticket.create' && d.ticket) {
       var tk = clone(d.ticket); tk.by = ev.user; tk.holdDays = 0; tk.status = 'open';
       ticketDatabase.unshift(tk);
@@ -228,8 +234,135 @@
       { u: 'MWH', m: pickSet(function () { return btuData; }, ['nmaeycelebtu'], ['btumeter1', 'btumeter2', 'btumeter3']) }
     ]);
   }
+  /* ================= Daily Operations: Electrical / HVAC / Plumbing (PM today · Major work · Pending) ================= */
+  var OPS = {
+    elec: { screen: 'screen-electrical', name: 'Electrical', pre: 'E' },
+    hvac: { screen: 'screen-hvac', name: 'HVAC', pre: 'H' },
+    plumb: { screen: 'screen-plumbing', name: 'Plumbing', pre: 'P' }
+  };
+  var MW_NATURE = ['Major breakdown', 'Preventive repair', 'New modification'], MW_PRIO = ['Urgent', 'Medium', 'Routine'];
+  var AMC_KW = {
+    hvac: /chiller|ahu|hvac|cooling|\bpac\b|vrf|\bfcu\b|air|fan|ventilat|duct|bms/i,
+    plumb: /pump|water|plumb|\bstp\b|\bwtp\b|sewage|drain|sanitary|\bro\b/i,
+    elec: /\bups\b|\bdg\b|diesel|transformer|panel|elevator|escalator|electri|\blt\b|\bht\b|vcb|acb|apfc|lighting|switchgear|battery/i
+  };
+  function fmtDT(v) { if (!v) return '—'; var m = String(v).match(/^(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d)/); if (!m) return esc(v); return fmtDate(m[1] + '-' + m[2] + '-' + m[3], '') + ' ' + m[4] + ':' + m[5]; }
+  function nowLocalDT() { var d = new Date(); return ymdOf(d) + 'T' + p2(d.getHours()) + ':' + p2(d.getMinutes()); }
+  function opsDept(k) { return OPS[k]; }
+  function mwList(k) { return majorList.filter(function (w) { return w.dept === OPS[k].name; }); }
+  function mwNextNo(k) { var y = String(new Date().getFullYear()).slice(2), n = mwList(k).length + 1; return 'JWC-GHQ-MW' + OPS[k].pre + y + '_' + p2(n); }
+  function mwCard(k, w) {
+    var open = w.status === 'open', pc = w.prio === 'Urgent' ? '#f87171' : w.prio === 'Medium' ? '#fbbf24' : '#34d399';
+    return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-major">' + esc(w.no || w.id) + '</span><span style="font-size:.72rem;color:' + pc + '">' + esc(w.prio) + (open ? ' · In progress' : ' · ✔ Completed') + '</span></div>' +
+      '<div class="op-item-title">' + esc(w.nature || 'Major work') + ' — ' + esc(w.loc) + '</div><div class="op-item-desc">' + esc(w.desc) + '</div>' +
+      '<div class="op-item-desc" style="margin-top:4px">Order date: ' + esc(fmtDate(w.date, '')) + ' · Started: ' + esc(fmtDT(w.start)) + (open ? '' : ' · Completed: ' + esc(fmtDT(w.end))) + '<br>Raised by ' + esc(w.by || '') + (open ? '' : '<br>Material used: ' + esc(w.material || '—')) + '</div>' +
+      '<div class="op-item-foot"><span></span><span style="display:flex;gap:6px">' +
+      (canDownload() ? '<button class="btn-gold-outline" onclick="GHQ.mwExcel(\'' + esc(w.id) + '\')">Excel</button>' : '') +
+      (open && canHold() ? '<button class="btn-gold-solid" onclick="GHQ.mwDone(\'' + esc(w.id) + '\')">Mark completed</button>' : '') + '</span></div></div>';
+  }
+  function renderMajorTab(k) {
+    var el = $('tab-' + k + '-major'); if (!el) return;
+    var L = mwList(k), open = L.filter(function (w) { return w.status === 'open'; }).reverse(), done = L.filter(function (w) { return w.status === 'done'; }).reverse().slice(0, 15);
+    el.innerHTML = '<div class="section-title"><span>Major Work · ' + OPS[k].name + '</span><span style="font-size:0.72rem; color:var(--gold-primary)">' + open.length + ' in progress</span></div>' +
+      '<div style="display:flex;gap:8px;margin-bottom:10px">' + (canHold() ? '<button class="btn-gold-solid" style="flex:1" onclick="GHQ.mwForm(\'' + k + '\')"><i class="fa-solid fa-plus"></i> New major work</button>' : '') +
+      (canDownload() && L.length ? '<button class="btn-gold-outline" onclick="GHQ.mwExcelAll(\'' + k + '\')">All (Excel)</button>' : '') + '</div>' +
+      (open.length ? open.map(function (w) { return mwCard(k, w); }).join('') : '<div class="ghq-note">No major work in progress.</div>') +
+      (done.length ? '<div class="section-title" style="margin-top:14px"><span>Completed</span><span style="font-size:0.72rem;color:var(--cyan)">last ' + done.length + '</span></div>' + done.map(function (w) { return mwCard(k, w); }).join('') : '');
+  }
+  function mwForm(k) {
+    if (!canHold()) { toast('Only Supervisor / Engineer / Admin can add major work'); return; }
+    function f(i, l, v, ph, t) { return '<label class="ghq-lbl">' + l + '</label><input id="mw-' + i + '" class="ghq-input"' + (t ? ' type="' + t + '"' : '') + ' value="' + esc(v || '') + '" placeholder="' + esc(ph || '') + '">'; }
+    function sel(i, l, arr) { return '<label class="ghq-lbl">' + l + '</label><select id="mw-' + i + '" class="cal-select" style="width:100%">' + arr.map(function (x) { return '<option>' + x + '</option>'; }).join('') + '</select>'; }
+    modal('<h3 class="ghq-h3">Major Works O&amp;M Form · ' + OPS[k].name + '</h3><input type="hidden" id="mw-k" value="' + k + '">' +
+      f('no', 'Order No.', mwNextNo(k)) + '<div class="ghq-grid2"><div>' + f('date', 'Date', ymdOf(new Date()), '', 'date') + '</div><div><label class="ghq-lbl">Department</label><input class="ghq-input" value="' + OPS[k].name + '" disabled></div></div>' +
+      f('loc', 'Location / Unit *', '', 'e.g. Office Tower / L-11') + sel('prio', 'Priority level', MW_PRIO) +
+      '<div class="sub-section-header" style="margin-top:10px">Scope of major work</div>' + sel('nature', 'Nature of problem', MW_NATURE) +
+      '<label class="ghq-lbl">Detailed description of work *</label><textarea id="mw-desc" class="ghq-input" rows="4"></textarea>' + f('start', 'Work start date &amp; time', nowLocalDT(), '', 'datetime-local') +
+      '<div class="ghq-note">Completion date and materials used are filled when the work is completed.</div>' +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" onclick="GHQ.mwSave()">Save</button></div>');
+  }
+  function mwSave() {
+    var g = function (x) { return ($('mw-' + x) || {}).value || ''; }, k = g('k');
+    var d = { id: 'MW-' + Date.now().toString(36).toUpperCase(), no: g('no').trim(), date: g('date'), dept: OPS[k].name, loc: g('loc').trim(), prio: g('prio'), nature: g('nature'), desc: g('desc').trim(), start: g('start') };
+    if (!d.loc) { toast('Enter the location / unit'); return; }
+    if (!d.desc) { toast('Enter the work description'); return; }
+    commit('major.add', d).then(function () { closeModal(); toast('✔ Major work added'); });
+  }
+  function mwDone(id) {
+    if (!canHold()) { toast('Only Supervisor / Engineer / Admin'); return; }
+    var w = majorList.filter(function (x) { return x.id === id; })[0]; if (!w) return;
+    modal('<h3 class="ghq-h3">Complete · ' + esc(w.no || w.id) + '</h3><div class="ghq-note">' + esc(w.nature || '') + ' — ' + esc(w.loc) + '</div>' +
+      '<label class="ghq-lbl">Work completion date &amp; time</label><input id="mw-end" class="ghq-input" type="datetime-local" value="' + nowLocalDT() + '">' +
+      '<label class="ghq-lbl">Material actually used</label><textarea id="mw-mat" class="ghq-input" rows="4" placeholder="e.g. 2 x 63A MCCB, 10 m cable 4 core 25 sqmm"></textarea>' +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" onclick="GHQ.mwDoneSave(\'' + esc(id) + '\')">Save &amp; complete</button></div>');
+  }
+  function mwDoneSave(id) {
+    var end = $('mw-end').value; if (!end) { toast('Enter the completion date & time'); return; }
+    commit('major.done', { id: id, end: end, material: $('mw-mat').value.trim() }).then(function () {
+      closeModal(); toast('✔ Major work completed');
+      if (canDownload()) mwExcel(id);
+    });
+  }
+  function mwExcel(id) {
+    var w = majorList.filter(function (x) { return x.id === id; })[0]; if (!w) return;
+    var H = function (t) { return { v: t, s: 1 }; }, R = function (a, b) { return [H(a), b == null ? '' : String(b)]; };
+    var rows = [[H('Major Works O&M Form · ' + w.dept), ''], R('Order No.', w.no), R('Date', fmtDate(w.date, '')), R('Department', w.dept), R('Location / Unit', w.loc), R('Priority level', w.prio),
+      [H('Scope of Major Work'), ''], R('Nature of problem', w.nature), R('Detailed description of work', w.desc), R('Work start date & time', fmtDT(w.start).replace(/&amp;/g, '&')),
+      [H('Completion details'), ''], R('Work completion date & time', w.status === 'done' ? fmtDT(w.end) : 'In progress'), R('Actual material used', w.material), R('Status', w.status === 'done' ? 'Completed' : 'In progress'), R('Raised by', w.by), R('Completed by', w.doneBy)];
+    var bytes = XlsxLite.build([{ name: 'Major Work', cols: [32, 70], rows: rows, merges: [], freeze: false }]);
+    saveBytes('MajorWork_' + String(w.no || w.id).replace(/[^\w\-]+/g, '_') + '.xlsx', XLSX_MIME, bytes);
+  }
+  function mwExcelAll(k) {
+    var H = function (t) { return { v: t, s: 1 }; };
+    var rows = [['Order No.', 'Date', 'Department', 'Location / Unit', 'Priority', 'Nature', 'Description', 'Start', 'Completed', 'Material used', 'Status', 'Raised by', 'Completed by'].map(H)];
+    mwList(k).forEach(function (w) { rows.push([w.no, w.date, w.dept, w.loc, w.prio, w.nature, w.desc, fmtDT(w.start), w.status === 'done' ? fmtDT(w.end) : '', w.material || '', w.status === 'done' ? 'Completed' : 'In progress', w.by || '', w.doneBy || '']); });
+    saveBytes('MajorWorks_' + OPS[k].name + '_' + stamp() + '.xlsx', XLSX_MIME, XlsxLite.build([{ name: OPS[k].name, cols: [20, 12, 12, 22, 10, 18, 40, 18, 18, 30, 12, 14, 14], rows: rows, freeze: true }]));
+  }
+  function renderPmTodayTab(k) {
+    var el = $('tab-' + k + '-pm'); if (!el) return;
+    var td = ymdOf(new Date()), tdD = parseYmd(td), out = [];
+    ppmRows.forEach(function (e, i) {
+      if (e.cat !== k) return;
+      if (doneDates(e).indexOf(td) >= 0) { out.push(ppmCard(i, e, 'done', tdD)); return; }
+      if (ymdOf(nextDue(e)) === td) out.push(ppmCard(i, e, ppmEval(e).wait ? 'wait' : 'due', tdD));
+    });
+    el.innerHTML = '<div class="section-title"><span>Today\'s ' + OPS[k].name + ' PM · ' + esc(fmtDate(td, '')) + '</span><span style="font-size:0.72rem; color:var(--cyan)">' + out.length + '</span></div>' +
+      (out.length ? out.join('') : '<div class="ghq-note">No ' + OPS[k].name + ' PM scheduled for today.</div>');
+  }
+  function renderPendingTab(k) {
+    var el = $('tab-' + k + '-pending'); if (!el) return;
+    var td = parseYmd(ymdOf(new Date())), h = '', n = 0;
+    var ppm = [];
+    ppmRows.forEach(function (e, i) { if (e.cat === k && !ppmEval(e).wait) { var d = nextDue(e); if (d < td) ppm.push({ i: i, e: e, d: d }); } });
+    ppm.sort(function (a, b) { return a.d - b.d; });
+    h += '<div class="section-title"><span>Pending PM</span><span style="font-size:0.72rem;color:var(--danger)">' + ppm.length + '</span></div>' + (ppm.length ? ppm.map(function (x) { return ppmCard(x.i, x.e, 'due', x.d); }).join('') : '<div class="ghq-note">No overdue PM.</div>'); n += ppm.length;
+    var tk = ticketDatabase.filter(function (t) { return t.dept === OPS[k].name && t.status !== 'closed'; });
+    h += '<div class="section-title" style="margin-top:14px"><span>Pending E-Tickets</span><span style="font-size:0.72rem;color:var(--danger)">' + tk.length + '</span></div>' +
+      (tk.length ? tk.map(function (t) {
+        var age = t.date ? Math.max(0, Math.round((td - parseYmd(String(t.date).slice(0, 10))) / 864e5)) : '';
+        return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pending">' + esc(t.id) + '</span><span style="font-size:.72rem;color:' + (t.status === 'hold' ? '#fbbf24' : '#f87171') + '">' + (t.status === 'hold' ? 'On hold' : 'Open') + (age !== '' && !isNaN(age) ? ' · ' + age + ' day' + (age === 1 ? '' : 's') : '') + '</span></div>' +
+          '<div class="op-item-title">' + esc(t.title) + '</div><div class="op-item-desc">' + esc(t.loc || '') + (t.priority ? ' · ' + esc(t.priority) : '') + '</div>' +
+          '<div class="op-item-foot"><span><i class="fa-solid fa-user-clock"></i> ' + esc(t.tech || '—') + '</span><button class="btn-gold-outline" onclick="openModule(\'screen-tickets\')">View</button></div></div>';
+      }).join('') : '<div class="ghq-note">No pending E-Tickets.</div>'); n += tk.length;
+    var am = (typeof amcPPMSchedules !== 'undefined' ? amcPPMSchedules : []).filter(function (a) {
+      if (!(a.status === 'overdue' || a.daysRemaining < 0)) return false;
+      var txt = (a.equip || '') + ' ' + (a.tag || '') + ' ' + (a.vendor || ''), cls = ['hvac', 'plumb', 'elec'].filter(function (o) { return AMC_KW[o].test(txt); })[0];
+      return cls === k;
+    });
+    h += '<div class="section-title" style="margin-top:14px"><span>Pending AMC PPM</span><span style="font-size:0.72rem;color:var(--danger)">' + am.length + '</span></div>' +
+      (am.length ? am.map(function (a) {
+        return '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(a.freq || 'AMC') + ' PPM</span><span style="font-size:.72rem;color:#f87171">Overdue' + (a.daysRemaining < 0 ? ' ' + (-a.daysRemaining) + ' day' + (a.daysRemaining === -1 ? '' : 's') : '') + ' · ' + esc(a.nextPPM || '') + '</span></div>' +
+          '<div class="op-item-title">' + esc(a.equip) + (a.tag ? ' <span style="color:var(--cyan);font-size:.72rem">[' + esc(a.tag) + ']</span>' : '') + '</div><div class="op-item-desc">Last PPM: ' + esc(a.lastPPM || '—') + '</div>' +
+          '<div class="op-item-foot"><span><i class="fa-solid fa-handshake"></i> ' + esc(a.vendor || '') + '</span><button class="btn-gold-outline" onclick="openModule(\'screen-amc\')">Open AMC</button></div></div>';
+      }).join('') : '<div class="ghq-note">No pending AMC PPM.</div>'); n += am.length;
+    el.innerHTML = '<div class="section-title"><span>Pending Work · ' + OPS[k].name + '</span><span style="font-size:0.72rem;color:var(--danger)">' + n + ' pending</span></div>' + h;
+  }
+  function renderOps() {
+    Object.keys(OPS).forEach(function (k) { try { renderPmTodayTab(k); renderMajorTab(k); renderPendingTab(k); } catch (e) {} });
+  }
   function refreshUI() {
     try { renderGhqCards(); } catch (e) {}
+    try { renderOps(); } catch (e) {}
     try { renderTickets(); } catch (e) {}
     try { renderAMCDashboard(); renderAMCMaster(); renderPPMSchedules(); } catch (e) {}
     try { calculateElecConsumption(); calculateWaterConsumption(); calculateBtuConsumption(); } catch (e) {}
@@ -265,6 +398,7 @@
       var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
       if (id === 'screen-ppm') renderPPM();
+      if (id === 'screen-electrical' || id === 'screen-hvac' || id === 'screen-plumbing') { try { renderOps(); } catch (e) {} }
       if (id === 'screen-roster') renderRoster();
       if (id === 'screen-dg') { renderDG(); pullDg(); }
       if (id === 'screen-assets') { astCat = null; astQ = ''; renderAssets(); pullAssets(); }
@@ -2053,7 +2187,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
