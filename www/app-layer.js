@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.2 · build ' + BUILD;
+  var VERSION = 'v8.3 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -261,6 +261,144 @@
   function pullDtpl() {
     if (LOCAL || !session) return Promise.resolve();
     return api('daily_tpl').then(function (r) { if (r && r.ok && Array.isArray(r.tpl)) { dailyTpl = r.tpl; LS.set('ghq_dtpl', dailyTpl); try { renderDlog(); } catch (e) {} } }).catch(function () {});
+  }
+
+  /* ===== Permit to Work (PTW) + LOTO register ===== */
+  var ptwTab = 'ptw', ptwCache = LS.get('ghq_ptw', []), lotoCache = LS.get('ghq_loto', []), ptwQ = '', ptwBusy = false;
+  var PTW_TYPES = ['Cold', 'Hot', 'Work at Height', 'Electrical', 'Confined Space', 'Excavation', 'Other'];
+  var LOTO_F = [
+    ['equip', 'Equipment / Machine Name *'], ['tag', 'Equipment Tag / Asset ID'], ['ptw', 'PTW NO'], ['area', 'Building / Area'], ['loc', 'Location / Room'], ['dept', 'Department'],
+    ['esrc', 'Energy Source Type', ['Electrical', 'Mechanical', 'HVAC', 'Plumbing', 'VT', 'Other']], ['emag', 'Energy Magnitude (e.g. 415 V, 6 bar)'], ['ipid', 'Isolation Point ID'],
+    ['idev', 'Isolation Device Type', ['ACB', 'MCCB', 'MCB', 'Isolator', 'Switch Fuse', 'Plug / Socket', 'Gate Valve', 'Ball Valve', 'Butterfly Valve', 'Blind / Spade', 'Mechanical Block', 'Other']],
+    ['iloc', 'Isolation Device Location'], ['panel', 'Panel / DB ID'], ['rating', 'Breaker / Isolator Rating (A)'], ['npos', 'Normal Position', ['ON', 'OFF', 'Open', 'Closed']],
+    ['lpos', 'Locked-out Position', ['OFF', 'Open', 'Closed', 'Racked Out', 'Blinded']], ['locks', 'Number of Locks Required'], ['lcol', 'Lock Colour / Type'], ['ttype', 'Tag Type'],
+    ['stored', 'Stored / Residual Energy Present', ['Yes', 'No']], ['release', 'Stored Energy Release Method'], ['verify', 'Zero-Energy Verification Method'], ['authp', 'Authorized Person(s)'],
+    ['affd', 'Affected Departments'], ['ppe', 'PPE Required'], ['proc', 'LOTO Procedure Doc No'], ['lrev', 'Last Review Date', 'date'], ['nrev', 'Next Review Due', 'date'],
+    ['status', 'Status', ['Active', 'Under Review', 'Obsolete']], ['rem', 'Remarks']];
+  var PTW_COLS = [['date', 'PTW Date'], ['no', 'PTW No'], ['dept', 'Dept.'], ['job', 'Job Description'], ['type', 'Type of work'], ['acceptor', 'Acceptor name'], ['vendor', 'Vendor Name'], ['people', 'No. of personnel'], ['issuer', 'Issuer'], ['approver', 'Approver'], ['sup', 'Supervision'], ['status', 'PTW status'], ['till', 'Issued till']];
+  function injectPtw() {
+    if ($('screen-ptw')) return;
+    var anchor = $('screen-dlog') || $('screen-readings'); if (!anchor) return;
+    anchor.insertAdjacentHTML('afterend', '<section class="screen-view" id="screen-ptw"><div class="op-screen-header"><button class="op-back-btn" onclick="openModule(\'screen-dashboard\')"><i class="fa-solid fa-arrow-left"></i> Dashboard</button><div class="op-title-area" style="text-align:right"><h2><i class="fa-solid fa-file-shield"></i> Permit to Work &amp; LOTO</h2><p>PTW register &amp; LOTO isolation points</p></div></div><div id="ptw-body"></div></section>');
+    Array.prototype.forEach.call(document.querySelectorAll('.action-pill'), function (el) { if (/PTW Permit/i.test(el.textContent)) el.setAttribute('onclick', "GHQ.ptwGo('ptw')"); });
+    Array.prototype.forEach.call(document.querySelectorAll('.menu-item'), function (el) { if (/Permit to Work/i.test(el.textContent)) el.setAttribute('onclick', "GHQ.ptwGo('ptw')"); });
+  }
+  function ptwGo(tab) { ptwTab = tab || ptwTab; openModule('screen-ptw'); }
+  function ptwPull() {
+    if (!navigator.onLine) return Promise.resolve();
+    return Promise.all([api('ptw_list', {}), api('loto_list', {})]).then(function (a) {
+      if (a[0] && a[0].ok) { ptwCache = a[0].list || []; LS.set('ghq_ptw', ptwCache.slice(0, 300)); }
+      if (a[1] && a[1].ok) { lotoCache = a[1].list || []; LS.set('ghq_loto', lotoCache.slice(0, 300)); }
+    }).catch(function () {});
+  }
+  function ptwSearch(v) { ptwQ = String(v || '').toLowerCase(); renderPtw(true); }
+  function ptwSwitch(t) { ptwTab = t; ptwQ = ''; renderPtw(); }
+  function renderPtw(keepFocus) {
+    var el = $('ptw-body'); if (!el) return;
+    var P = ptwTab === 'ptw', list = (P ? ptwCache : lotoCache).filter(function (x) { return !ptwQ || JSON.stringify(x).toLowerCase().indexOf(ptwQ) >= 0; });
+    var h = '<div class="ghq-grid2" style="margin-bottom:8px"><button class="ghq-btn' + (P ? '' : ' ghost') + '" onclick="GHQ.ptwSwitch(\'ptw\')">Permit to Work</button><button class="ghq-btn' + (P ? ' ghost' : '') + '" onclick="GHQ.ptwSwitch(\'loto\')">LOTO Register</button></div>' +
+      '<div class="ghq-grid2" style="margin-bottom:8px"><button class="btn-gold-solid" onclick="GHQ.' + (P ? 'ptwForm()' : 'lotoForm()') + '"><i class="fa-solid fa-plus"></i> New ' + (P ? 'PTW' : 'LOTO entry') + '</button>' +
+      (canDownload() ? '<button class="btn-gold-solid" onclick="GHQ.ptwExcel()"><i class="fa-solid fa-file-excel"></i> Download Excel</button>' : '<span></span>') + '</div>' +
+      '<input id="ptw-q" class="ghq-input" placeholder="Search…" value="' + esc(ptwQ) + '" oninput="GHQ.ptwSearch(this.value)">';
+    if (!navigator.onLine) h += '<div class="ghq-note">Offline — showing last saved list. New entries need internet.</div>';
+    h += '<div class="section-title"><span>' + (P ? 'Permits' : 'Isolation points') + '</span><span style="font-size:.72rem;color:var(--cyan)">' + list.length + '</span></div>';
+    if (!list.length) h += '<div class="ghq-note">' + (ptwBusy ? 'Loading…' : 'No entries.') + '</div>';
+    list.slice(0, 120).forEach(function (x) {
+      if (P) {
+        var c = x.status === 'Open' ? 'var(--gold-light)' : x.status === 'Cancelled' ? '#f87171' : '#34d399';
+        h += '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(x.no || '—') + '</span><span style="font-size:.75rem;color:' + c + '">' + esc(x.status || '') + '</span></div>' +
+          '<div class="op-item-desc">' + esc(x.job) + '</div><div class="ghq-note" style="margin:2px 0">' + esc(fmtDate(x.date, x.date)) + ' · ' + esc(x.dept) + ' · ' + esc(x.type) + (x.vendor ? ' · ' + esc(x.vendor) : '') + '</div>' +
+          '<div class="ghq-note" style="margin:2px 0">Acceptor: ' + esc(x.acceptor || '—') + ' · Issuer: ' + esc(x.issuer || '—') + ' · Approver: ' + esc(x.approver || '—') + (x.people ? ' · ' + esc(x.people) + ' persons' : '') + '</div>' +
+          (x.rem ? '<div class="ghq-note">' + esc(x.rem) + '</div>' : '') +
+          '<div class="op-item-foot"><span class="ghq-note" style="margin:0">' + (x.by ? 'By ' + esc(x.by) : '') + '</span><span>' +
+          (x.status === 'Open' ? '<button class="btn-gold-solid" onclick="GHQ.ptwClose(' + x.r + ')">Close / Cancel</button>' : '<button class="btn-gold-solid" onclick="GHQ.ptwReopen(' + x.r + ')">Reopen</button>') + '</span></div></div>';
+      } else {
+        h += '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(x.id) + '</span><span style="font-size:.75rem;color:' + (x.status === 'Active' ? '#34d399' : 'var(--text-muted)') + '">' + esc(x.status) + '</span></div>' +
+          '<div class="op-item-desc">' + esc(x.equip) + (x.tag ? ' · ' + esc(x.tag) : '') + '</div><div class="ghq-note" style="margin:2px 0">' + esc([x.area, x.loc, x.dept].filter(Boolean).join(' · ')) + '</div>' +
+          '<div class="ghq-note" style="margin:2px 0">' + esc([x.esrc, x.emag].filter(Boolean).join(' ')) + (x.ipid ? ' · Point ' + esc(x.ipid) : '') + (x.idev ? ' · ' + esc(x.idev) : '') + (x.npos ? ' · ' + esc(x.npos) + ' → ' + esc(x.lpos) : '') + (x.ptw ? ' · PTW ' + esc(x.ptw) : '') + '</div>' +
+          '<div class="op-item-foot"><span class="ghq-note" style="margin:0">' + (x.nrev ? 'Review due ' + esc(fmtDate(x.nrev, x.nrev)) : '') + '</span><span><button class="btn-gold-solid" onclick="GHQ.lotoForm(' + x.r + ')">View / Edit</button></span></div></div>';
+      }
+    });
+    el.innerHTML = h;
+    if (keepFocus) { var q = $('ptw-q'); if (q) { q.focus(); try { q.setSelectionRange(q.value.length, q.value.length); } catch (e) {} } }
+  }
+  function ptwForm() {
+    function f(i, l, v, t, ph) { return '<label class="ghq-lbl">' + l + '</label><input id="ptw-' + i + '" class="ghq-input"' + (t ? ' type="' + t + '"' : '') + ' value="' + esc(v || '') + '" placeholder="' + esc(ph || '') + '">'; }
+    modal('<h3 class="ghq-h3">Work Permit (PTW)</h3><div class="ghq-note">PTW No. is generated automatically on save.</div>' +
+      '<div class="ghq-grid2"><div>' + f('date', 'PTW Date *', ymdOf(new Date()), 'date') + '</div><div>' + f('dept', 'Dept.', 'GHQ') + '</div></div>' +
+      '<label class="ghq-lbl">Job Description *</label><textarea id="ptw-job" class="ghq-input" rows="3"></textarea>' +
+      '<label class="ghq-lbl">Type of work</label><select id="ptw-type" class="cal-select" style="width:100%">' + PTW_TYPES.map(function (x) { return '<option>' + x + '</option>'; }).join('') + '</select>' +
+      f('acceptor', 'Acceptor name') + f('vendor', 'Vendor Name') + f('people', 'No. of personnel', '', 'number') + f('issuer', 'Issuer', session && session.name) + f('approver', 'Approver') + f('sup', 'Supervision') +
+      '<label class="ghq-lbl">PTW status</label><select id="ptw-status" class="cal-select" style="width:100%"><option>Open</option><option>Closed</option></select>' + f('till', 'Issued till', '', 'datetime-local') +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" id="ptw-save" onclick="GHQ.ptwSave()">Save</button></div>');
+  }
+  function ptwSave() {
+    var g = function (x) { return (($('ptw-' + x) || {}).value || '').trim(); }, e = {};
+    ['date', 'dept', 'job', 'type', 'acceptor', 'vendor', 'people', 'issuer', 'approver', 'sup', 'status', 'till'].forEach(function (k) { e[k] = g(k); });
+    if (!e.job) { toast('Enter the job description'); return; }
+    if (!e.date) { toast('Enter the PTW date'); return; }
+    if (!navigator.onLine) { toast('Internet required to save a PTW'); return; }
+    var b = $('ptw-save'); if (b) b.disabled = true;
+    api('ptw_add', { e: e }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      closeModal(); toast('✔ Saved · ' + r.no); return ptwPull().then(function () { renderPtw(); });
+    }).catch(function (er) { if (b) b.disabled = false; toast('Error: ' + (er && er.message || er)); });
+  }
+  function ptwFind(r) { return ptwCache.filter(function (x) { return x.r === r; })[0]; }
+  function ptwClose(r) {
+    var x = ptwFind(r); if (!x) return;
+    modal('<h3 class="ghq-h3">' + esc(x.no) + '</h3><div class="ghq-note">' + esc(x.job) + '</div><label class="ghq-lbl">Remarks</label><input id="ptw-rem" class="ghq-input">' +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn" onclick="GHQ.ptwSet(' + r + ',\'Closed\')">Close permit</button><button class="ghq-btn ghost" onclick="GHQ.ptwSet(' + r + ',\'Cancelled\')">Cancel permit</button></div><button class="ghq-btn ghost" style="margin-top:6px;width:100%" onclick="GHQ.closeModal()">Back</button>');
+  }
+  function ptwReopen(r) { ptwSet(r, 'Open'); }
+  function ptwSet(r, st) {
+    var x = ptwFind(r); if (!x) return;
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    api('ptw_update', { r: r, no: x.no, status: st, rem: (($('ptw-rem') || {}).value || '') }).then(function (res) {
+      if (!res.ok) throw new Error(res.error || 'error');
+      closeModal(); toast('✔ ' + st); return ptwPull().then(function () { renderPtw(); });
+    }).catch(function (er) { toast('Error: ' + (er && er.message || er)); });
+  }
+  function lotoForm(r) {
+    var x = r ? lotoCache.filter(function (z) { return z.r === r; })[0] : null, can = !x || canHold() || x.by === (session && session.name);
+    var h = '<h3 class="ghq-h3">' + (x ? esc(x.id) + ' · LOTO' : 'New LOTO entry') + '</h3>' + (x ? '' : '<div class="ghq-note">LOTO ID and Sr No. are generated automatically.</div>') + '<input type="hidden" id="lt-r" value="' + (x ? x.r : '') + '">';
+    LOTO_F.forEach(function (f) {
+      var k = f[0], v = x ? x[k] : (k === 'status' ? 'Active' : ''), id = 'lt-' + k;
+      if (k === 'ptw') {
+        var op = ptwCache.filter(function (p) { return p.status === 'Open' && p.no; }).map(function (p) { return p.no; });
+        h += '<label class="ghq-lbl">' + f[1] + '</label><input id="' + id + '" class="ghq-input" list="lt-ptwl" value="' + esc(v) + '"><datalist id="lt-ptwl">' + op.map(function (n) { return '<option value="' + esc(n) + '">'; }).join('') + '</datalist>';
+      } else if (f[2] && f[2] !== 'date') {
+        var arr = f[2].slice(); if (v && arr.indexOf(v) < 0) arr.push(v);
+        h += '<label class="ghq-lbl">' + f[1] + '</label><select id="' + id + '" class="cal-select" style="width:100%"><option value=""></option>' + arr.map(function (o) { return '<option' + (o === v ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select>';
+      } else h += '<label class="ghq-lbl">' + f[1] + '</label><input id="' + id + '" class="ghq-input"' + (f[2] === 'date' ? ' type="date"' : '') + ' value="' + esc(v) + '">';
+    });
+    h += '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">' + (can ? 'Cancel' : 'Close') + '</button>' + (can ? '<button class="ghq-btn" id="lt-save" onclick="GHQ.lotoSave()">Save</button>' : '<span></span>') + '</div>';
+    modal(h);
+  }
+  function lotoSave() {
+    var e = {}, r = Number((($('lt-r') || {}).value) || 0);
+    LOTO_F.forEach(function (f) { e[f[0]] = (($('lt-' + f[0]) || {}).value || '').trim(); });
+    if (!e.equip) { toast('Enter the equipment / machine name'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    var old = r ? lotoCache.filter(function (z) { return z.r === r; })[0] : null, b = $('lt-save'); if (b) b.disabled = true;
+    api(r ? 'loto_update' : 'loto_add', { r: r, id: old ? old.id : '', e: e }).then(function (res) {
+      if (!res.ok) throw new Error(res.error || 'error');
+      closeModal(); toast('✔ Saved' + (res.id ? ' · ' + res.id : '')); return ptwPull().then(function () { renderPtw(); });
+    }).catch(function (er) { if (b) b.disabled = false; toast('Error: ' + (er && er.message || er)); });
+  }
+  function ptwExcel() {
+    if (!canDownload()) { toast('Excel download is for Admin / Engineer / RIL / PM / APM'); return; }
+    var P = ptwTab === 'ptw', H = function (t) { return { v: t, s: 1 }; }, rows, sheet;
+    if (P) {
+      rows = [PTW_COLS.map(function (c) { return H(c[1]); })];
+      ptwCache.slice().reverse().forEach(function (x) { rows.push(PTW_COLS.map(function (c) { var v = x[c[0]]; return c[0] === 'date' ? fmtDate(v, v) : c[0] === 'people' ? (v === '' ? '' : Number(v)) : v; })); });
+      sheet = { name: 'PTW', cols: [12, 24, 8, 44, 16, 18, 20, 10, 16, 16, 16, 12, 18], rows: rows, freeze: true };
+    } else {
+      rows = [['Sr No'].concat(['LOTO ID']).map(H).concat(LOTO_F.map(function (f) { return H(f[1].replace(' *', '')); })).concat([H('Entered by')])];
+      lotoCache.slice().reverse().forEach(function (x) { rows.push([x.sr, x.id].concat(LOTO_F.map(function (f) { return x[f[0]]; })).concat([x.by])); });
+      sheet = { name: 'LOTO_Register', cols: [6, 10].concat(LOTO_F.map(function () { return 20; })).concat([14]), rows: rows, freeze: true };
+    }
+    saveBytes((P ? 'PTW_' : 'LOTO_Register_') + stamp() + '.xlsx', XLSX_MIME, XlsxLite.build([sheet]));
   }
   function injectDailyLog() {
     if ($('screen-dlog')) return;
@@ -668,9 +806,10 @@
     window.openModule = function (id, tab) {
       if ((id === 'screen-users' || id === 'screen-backup') && !(session && session.role === 'admin')) { toast('Admin only'); return; }
       om(id, tab);
-      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dlog': 'Daily Log', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
+      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dlog': 'Daily Log', 'screen-ptw': 'Permit to Work & LOTO', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
       if (id === 'screen-amc') { try { injectAmc(); } catch (e) {} pullAmcPpm(); }
+      if (id === 'screen-ptw') { renderPtw(); ptwBusy = true; ptwPull().then(function () { ptwBusy = false; renderPtw(); }); }
       if (id === 'screen-dlog') { renderDlog(); pullDtpl(); pullChecklists().then(renderDlog); }
       if (id === 'screen-ppm') renderPPM();
       if (id === 'screen-electrical' || id === 'screen-hvac' || id === 'screen-plumbing') { try { renderOps(); } catch (e) {} }
@@ -2463,11 +2602,11 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, ptwGo: ptwGo, ptwSwitch: ptwSwitch, ptwSearch: ptwSearch, ptwForm: ptwForm, ptwSave: ptwSave, ptwClose: ptwClose, ptwReopen: ptwReopen, ptwSet: ptwSet, lotoForm: lotoForm, lotoSave: lotoSave, ptwExcel: ptwExcel, _ptwSet: function (a, b) { ptwCache = a; lotoCache = b; renderPtw(); }, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
-  injectDailyLog(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
+  injectDailyLog(); injectPtw(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
   idbOpen().then(qAll).then(function (q) {
     queue = q;
     if (NOT_CONFIGURED) { showLogin(''); return; }
