@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.4 · build ' + BUILD;
+  var VERSION = 'v8.5 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -491,6 +491,175 @@
     bdCache.slice().reverse().forEach(function (x) { rows.push(BD_COLS.map(function (c) { var v = x[c[0]]; return (c[0] === 'date' || c[0] === 'sd' || c[0] === 'ed') ? (v ? fmtDate(v, v) : '') : c[0] === 'mins' ? (v === '' ? '' : Number(v)) : v; })); });
     saveBytes('Equipment_Breakdown_Tracker_' + stamp() + '.xlsx', XLSX_MIME, XlsxLite.build([{ name: 'Equipment Breakdown Tracker', cols: [18, 12, 24, 14, 20, 40, 24, 36, 22, 18, 14, 10, 14, 10, 12, 10, 18], rows: rows, freeze: true }]));
   }
+
+  /* ===== Spares & Consumables (incl. LOTO locks and tags) ===== */
+  var spItems = LS.get('ghq_sp', []), spLog = LS.get('ghq_splog', []), spCat = 'All', spQ = '', spTab = 'stock', spBusy = false, SP_CATS = ['Electrical', 'HVAC', 'Plumbing', 'LOTO', 'Tag', 'Other'];
+  function injectSpares() {
+    if ($('screen-sp')) return;
+    var anchor = $('screen-bd') || $('screen-ptw') || $('screen-readings'); if (!anchor) return;
+    anchor.insertAdjacentHTML('afterend', '<section class="screen-view" id="screen-sp"><div class="op-screen-header"><button class="op-back-btn" onclick="openModule(\'screen-dashboard\')"><i class="fa-solid fa-arrow-left"></i> Dashboard</button><div class="op-title-area" style="text-align:right"><h2><i class="fa-solid fa-boxes-stacked"></i> Spares &amp; Consumables</h2><p>Stock, issue, receive · LOTO &amp; tag inventory</p></div></div><div id="sp-body"></div></section>');
+    Array.prototype.forEach.call(document.querySelectorAll('.menu-item'), function (el) { if (/Spares & Consumables/i.test(el.textContent)) el.setAttribute('onclick', "openModule('screen-sp')"); });
+  }
+  function spPull() {
+    if (!navigator.onLine) return Promise.resolve();
+    return api('spares_list', {}).then(function (r) { if (r && r.ok) { spItems = r.items || []; spLog = r.log || []; LS.set('ghq_sp', spItems.slice(0, 400)); LS.set('ghq_splog', spLog.slice(0, 200)); } }).catch(function () {});
+  }
+  function spSet(k, v) { if (k === 'cat') spCat = v; if (k === 'tab') spTab = v; if (k === 'q') { spQ = String(v || '').toLowerCase(); renderSp(true); return; } renderSp(); }
+  function spLow(x) { return Number(x.stock) <= Number(x.min); }
+  function renderSp(keepFocus) {
+    var el = $('sp-body'); if (!el) return;
+    var low = spItems.filter(spLow).length, lt = spItems.filter(function (x) { return x.cat === 'LOTO' || x.cat === 'Tag'; });
+    function kp(l, v, c) { return '<div class="op-item-card" style="flex:1;min-width:30%;text-align:center;padding:8px"><div style="font-size:.62rem;color:var(--text-muted)">' + l + '</div><div style="font-size:1.1rem;font-weight:700;color:' + (c || 'var(--gold-light)') + '">' + v + '</div></div>'; }
+    var h = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">' + kp('ITEMS', spItems.length) + kp('LOW STOCK', low, low ? '#f87171' : '#34d399') + kp('LOTO & TAG', lt.length) + '</div>' +
+      '<div class="ghq-grid2" style="margin-bottom:8px"><button class="btn-gold-solid" onclick="GHQ.spItemForm()"' + (canHold() ? '' : ' style="display:none"') + '><i class="fa-solid fa-plus"></i> New item</button>' + (canDownload() ? '<button class="btn-gold-solid" onclick="GHQ.spExcel()"><i class="fa-solid fa-file-excel"></i> Download Excel</button>' : '<span></span>') + '</div>' +
+      '<div style="display:flex;gap:6px;margin-bottom:8px"><button class="ghq-btn' + (spTab === 'stock' ? '' : ' ghost') + '" onclick="GHQ.spSet(\'tab\',\'stock\')">Stock</button><button class="ghq-btn' + (spTab === 'log' ? '' : ' ghost') + '" onclick="GHQ.spSet(\'tab\',\'log\')">Issue / Receive log</button></div>';
+    if (!navigator.onLine) h += '<div class="ghq-note">Offline — showing last saved list. Stock changes need internet.</div>';
+    if (spTab === 'log') {
+      h += '<div class="section-title"><span>Recent movements</span><span style="font-size:.72rem;color:var(--cyan)">' + spLog.length + '</span></div>';
+      if (!spLog.length) h += '<div class="ghq-note">No movements yet.</div>';
+      spLog.slice(0, 100).forEach(function (l) { var c = l.type === 'Issue' ? '#f87171' : '#34d399'; h += '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(l.code) + '</span><span style="font-size:.75rem;color:' + c + '">' + esc(l.type) + ' ' + (l.type === 'Adjust' ? (l.qty > 0 ? '+' : '') : '') + esc(l.qty) + '</span></div><div class="op-item-desc">' + esc(l.name) + '</div><div class="ghq-note" style="margin:2px 0">' + esc(fmtDate(l.date, l.date)) + ' ' + esc(l.time) + ' · Balance ' + esc(l.bal) + (l['for'] ? ' · ' + esc(l['for']) : '') + (l.ref ? ' · ' + esc(l.ref) : '') + ' · ' + esc(l.person || l.by) + '</div></div>'; });
+      el.innerHTML = h; return;
+    }
+    h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">' + ['All', 'Low'].concat(SP_CATS).map(function (c) { return '<button class="ghq-btn' + (spCat === c ? '' : ' ghost') + '" style="padding:4px 10px" onclick="GHQ.spSet(\'cat\',\'' + c + '\')">' + c + '</button>'; }).join('') + '</div>' +
+      '<input id="sp-q" class="ghq-input" placeholder="Search item / code…" value="' + esc(spQ) + '" oninput="GHQ.spSet(\'q\',this.value)">';
+    var list = spItems.filter(function (x) { return (spCat === 'All' || (spCat === 'Low' ? spLow(x) : x.cat === spCat)) && (!spQ || (x.name + ' ' + x.code + ' ' + x.loc).toLowerCase().indexOf(spQ) >= 0); });
+    if (!list.length) h += '<div class="ghq-note">' + (spBusy ? 'Loading…' : 'No items.') + '</div>';
+    list.slice(0, 150).forEach(function (x) {
+      var lo = spLow(x);
+      h += '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(x.code) + ' · ' + esc(x.cat) + '</span><span style="font-size:.9rem;font-weight:700;color:' + (lo ? '#f87171' : '#34d399') + '">' + esc(x.stock) + ' ' + esc(x.unit) + '</span></div>' +
+        '<div class="op-item-desc">' + esc(x.name) + '</div><div class="ghq-note" style="margin:2px 0">Min ' + esc(x.min) + (x.loc ? ' · ' + esc(x.loc) : '') + (lo ? ' · <span style="color:#f87171">LOW STOCK</span>' : '') + '</div>' +
+        '<div class="op-item-foot"><span>' + (canHold() ? '<button class="btn-gold-outline" onclick="GHQ.spItemForm(' + x.r + ')">Edit</button> ' : '') + '</span><span><button class="btn-gold-outline" onclick="GHQ.spTxnForm(' + x.r + ',\'Receive\')">Receive</button> <button class="btn-gold-solid" onclick="GHQ.spTxnForm(' + x.r + ',\'Issue\')">Issue</button></span></div></div>';
+    });
+    el.innerHTML = h;
+    if (keepFocus) { var q = $('sp-q'); if (q) { q.focus(); try { q.setSelectionRange(q.value.length, q.value.length); } catch (e) {} } }
+  }
+  function spFind(r) { return spItems.filter(function (x) { return x.r === r; })[0]; }
+  function spItemForm(r) {
+    if (!canHold()) { toast('Only Supervisor / Engineer / Admin'); return; }
+    var x = r ? spFind(r) : null, v = function (k, d) { return x ? x[k] : (d || ''); };
+    function f(i, l, val, t) { return '<label class="ghq-lbl">' + l + '</label><input id="sp-' + i + '" class="ghq-input"' + (t ? ' type="' + t + '"' : '') + ' value="' + esc(val) + '">'; }
+    modal('<h3 class="ghq-h3">' + (x ? 'Edit ' + esc(x.code) : 'New item') + '</h3><input type="hidden" id="sp-r" value="' + (x ? x.r : '') + '"><input type="hidden" id="sp-code" value="' + (x ? esc(x.code) : '') + '">' + f('name', 'Item name *', v('name')) +
+      '<label class="ghq-lbl">Category</label><select id="sp-cat" class="cal-select" style="width:100%">' + SP_CATS.map(function (c) { return '<option' + (c === v('cat', 'Electrical') ? ' selected' : '') + '>' + c + '</option>'; }).join('') + '</select>' +
+      '<div class="ghq-grid2"><div>' + f('unit', 'Unit', v('unit', 'nos')) + '</div><div>' + f('min', 'Min stock', v('min', 0), 'number') + '</div></div>' + (x ? '' : f('open', 'Opening stock', 0, 'number')) + f('loc', 'Location / Store', v('loc')) + f('rem', 'Remarks', v('rem')) +
+      (x ? '<div class="ghq-note">Change stock with Receive / Issue (or Adjust below).</div>' : '') +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" id="sp-save" onclick="GHQ.spItemSave()">Save</button></div>' + (x ? '<button class="ghq-btn ghost" style="width:100%;margin-top:6px" onclick="GHQ.spTxnForm(' + x.r + ',\'Adjust\')">Adjust stock (count correction)</button>' : ''));
+  }
+  function spItemSave() {
+    var g = function (k) { return (($('sp-' + k) || {}).value || '').trim(); };
+    if (!g('name')) { toast('Enter the item name'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    var b = $('sp-save'); if (b) b.disabled = true;
+    api('spares_item', { r: Number(g('r') || 0), code: g('code'), e: { name: g('name'), cat: g('cat'), unit: g('unit'), min: g('min'), open: g('open'), loc: g('loc'), rem: g('rem') } }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error'); closeModal(); toast('✔ Saved'); return spPull().then(function () { renderSp(); });
+    }).catch(function (er) { if (b) b.disabled = false; toast('Error: ' + (er && er.message || er)); });
+  }
+  function spTxnForm(r, type) {
+    var x = spFind(r); if (!x) return;
+    function f(i, l, val, t, ph) { return '<label class="ghq-lbl">' + l + '</label><input id="sp-' + i + '" class="ghq-input"' + (t ? ' type="' + t + '"' : '') + ' value="' + esc(val || '') + '" placeholder="' + esc(ph || '') + '">'; }
+    modal('<h3 class="ghq-h3">' + type + ' · ' + esc(x.name) + '</h3><div class="ghq-note">In stock: ' + esc(x.stock) + ' ' + esc(x.unit) + '</div><input type="hidden" id="sp-r" value="' + x.r + '"><input type="hidden" id="sp-code" value="' + esc(x.code) + '"><input type="hidden" id="sp-type" value="' + type + '">' +
+      f('qty', type === 'Adjust' ? 'New stock (counted) *' : 'Quantity *', '', 'number') + (type === 'Issue' ? f('for', 'Used for / Equipment', '', '', 'e.g. AHU-04 belt change') + f('ref', 'Ref (PTW / LOTO / Ticket)', '', '', 'e.g. JWC-GHQ-PTW26_001') + f('person', 'Issued to', session && session.name) : type === 'Receive' ? f('for', 'Supplier / Remarks') + f('ref', 'Ref (PO / Challan)') : f('for', 'Reason')) +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" id="sp-save" onclick="GHQ.spTxnSave()">Save</button></div>');
+  }
+  function spTxnSave() {
+    var g = function (k) { return (($('sp-' + k) || {}).value || '').trim(); }, q = Number(g('qty'));
+    if (g('qty') === '' || isNaN(q)) { toast('Enter the quantity'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    var b = $('sp-save'); if (b) b.disabled = true;
+    api('spares_txn', { r: Number(g('r')), code: g('code'), type: g('type'), qty: q, 'for': g('for'), ref: g('ref'), person: g('person') }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error'); closeModal(); toast('✔ Saved · balance ' + r.bal); return spPull().then(function () { renderSp(); });
+    }).catch(function (er) { if (b) b.disabled = false; toast('Error: ' + (er && er.message || er)); });
+  }
+  function spExcel() {
+    if (!canDownload()) { toast('Excel download is for Admin / Engineer / RIL / PM / APM'); return; }
+    var H = function (t) { return { v: t, s: 1 }; }, a = [['Item Code', 'Item Name', 'Category', 'Unit', 'Opening Stock', 'Current Stock', 'Min Stock', 'Status', 'Location / Store', 'Remarks'].map(H)], b = [['Date', 'Time', 'Item Code', 'Item Name', 'Category', 'Type', 'Qty', 'Balance', 'Used for / Equipment', 'Ref', 'Person', 'Entered by'].map(H)];
+    spItems.forEach(function (x) { a.push([x.code, x.name, x.cat, x.unit, x.open, x.stock, x.min, spLow(x) ? 'LOW' : 'OK', x.loc, x.rem]); });
+    spLog.forEach(function (l) { b.push([fmtDate(l.date, l.date), l.time, l.code, l.name, l.cat, l.type, l.qty, l.bal, l['for'], l.ref, l.person, l.by]); });
+    var lt = [['Item Code', 'Item Name', 'Category', 'Unit', 'In stock', 'Min', 'Status'].map(H)];
+    spItems.filter(function (x) { return x.cat === 'LOTO' || x.cat === 'Tag'; }).forEach(function (x) { lt.push([x.code, x.name, x.cat, x.unit, x.stock, x.min, spLow(x) ? 'LOW' : 'OK']); });
+    saveBytes('Spares_Consumables_' + stamp() + '.xlsx', XLSX_MIME, XlsxLite.build([{ name: 'Stock', cols: [10, 36, 12, 8, 10, 10, 10, 8, 18, 24], rows: a, freeze: true }, { name: 'LOTO & Tag', cols: [10, 36, 10, 8, 10, 8, 8], rows: lt, freeze: true }, { name: 'Movements', cols: [12, 8, 10, 34, 10, 9, 8, 9, 28, 22, 16, 14], rows: b, freeze: true }]));
+  }
+
+  /* ===== MIS & Consumption Reports ===== */
+  function injectMis() {
+    if ($('screen-mis')) return;
+    var anchor = $('screen-sp') || $('screen-bd') || $('screen-readings'); if (!anchor) return;
+    anchor.insertAdjacentHTML('afterend', '<section class="screen-view" id="screen-mis"><div class="op-screen-header"><button class="op-back-btn" onclick="openModule(\'screen-dashboard\')"><i class="fa-solid fa-arrow-left"></i> Dashboard</button><div class="op-title-area" style="text-align:right"><h2><i class="fa-solid fa-chart-line"></i> MIS &amp; Consumption</h2><p>Monthly utility consumption &amp; O&amp;M summary</p></div></div><div id="mis-body"></div></section>');
+    Array.prototype.forEach.call(document.querySelectorAll('.menu-item'), function (el) { if (/MIS & Consumption/i.test(el.textContent)) el.setAttribute('onclick', "openModule('screen-mis')"); });
+  }
+  var misMonth = ymdOf(new Date()).slice(0, 7);
+  function misCons(y, mo) {                           // per-meter consumption for the month: [{kind,panel,feeder,unit,cons,n}]
+    var hist = {}, out = [], pre = y + '-' + p2(mo + 1), baseKey = dayKey(new Date(y, mo, 0).getTime() + 12 * 36e5);
+    allEvents().filter(function (e) { return e.type === 'reading'; }).forEach(function (e) { var d = e.d, k = d.kind + '|' + d.panel + '|' + d.feeder; (hist[k] = hist[k] || []).push({ day: dayKey(e.ts), v: Number(d.value) }); });
+    [['elec', elecData], ['water', waterData], ['btu', btuData]].forEach(function (set) {
+      Object.keys(set[1]).forEach(function (panel) {
+        set[1][panel].forEach(function (f) {
+          var h = (hist[set[0] + '|' + panel + '|' + f.name] || []).slice().sort(function (a, b) { return a.day < b.day ? -1 : 1; }), base, last, n = 0;
+          h.forEach(function (x) { if (isNaN(x.v)) return; if (x.day <= baseKey) base = x.v; else if (x.day.slice(0, 7) === pre) { last = x.v; n++; } });
+          if (!n) return;
+          out.push({ kind: set[0], panel: panel, feeder: f.name, unit: (READ[set[0]] || {}).unit || '', cons: base === undefined ? null : Math.round((last - base) * 100) / 100, n: n });
+        });
+      });
+    });
+    return out;
+  }
+  function misUtil(list) {                           // GHQ Facility + NMAEYC totals, same meters as the dashboard cards
+    function one(kind, pn, fn) { var best = null; list.forEach(function (m) { if (m.kind !== kind || nz(m.feeder).indexOf(fn) < 0) return; var sc = nz(m.panel).indexOf(pn) >= 0 ? 2 : 1; if (!best || sc > best.s) best = { s: sc, m: m }; }); return best && best.m; }
+    function sum(arr) { var t = 0, got = 0; arr.forEach(function (m) { if (m && m.cons !== null) { t += m.cons; got++; } }); return got ? Math.round(t * 100) / 100 : null; }
+    function set(kind, panels, feeders) { return list.filter(function (m) { return m.kind === kind && panels.indexOf(nz(m.panel)) >= 0 && (!feeders || feeders.indexOf(nz(m.feeder)) >= 0); }); }
+    return [
+      { site: 'GHQ Facility', rows: [['Electrical', 'kWh', sum([one('elec', 'mltp1', 'tr16ic'), one('elec', 'mltp2', 'tr17ic'), one('elec', 'mltp3', 'tr18ic')])], ['DWS Water', 'kL', sum([one('water', 'watermeter', 'dwsl04ghq')])], ['FWS Water', 'kL', sum([one('water', 'watermeter', 'fwsl04ghq')])], ['BTU', 'MWH', sum([one('btu', 'ghqbtu', 'ghqbtu')])]] },
+      { site: 'NMAEYC', rows: [['Electrical', 'kWh', sum(set('elec', ['nmaeycele', 'nmaeyceleelevator'], null))], ['DWS Water', 'kL', sum(set('water', ['nmaeycwater'], ['dwsl04nzone', 'dwsl05nzone', 'dwsl05mzone']))], ['FWS Water', 'kL', sum(set('water', ['nmaeycwater'], ['fwsl05nzone', 'fwsl05mzone']))], ['BTU', 'MWH', sum(set('btu', ['nmaeycelebtu'], ['btumeter1', 'btumeter2', 'btumeter3']))]] }
+    ];
+  }
+  function misOps(m) {
+    var inM = function (d) { return String(d || '').slice(0, 7) === m; }, bd = bdCache.filter(function (x) { return inM(x.date); }), pt = ptwCache.filter(function (x) { return inM(x.date); }),
+      cl = clItems.filter(function (x) { return inM(x.date); }), mw = majorList.filter(function (x) { return inM(x.date); }), iss = spLog.filter(function (l) { return l.type === 'Issue' && inM(l.date); }), mins = 0;
+    bd.forEach(function (x) { if (x.mins !== '' && !isNaN(Number(x.mins))) mins += Number(x.mins); });
+    return [
+      ['Breakdowns', [['Total', bd.length], ['Open', bd.filter(function (x) { return x.status !== 'Closed'; }).length], ['Closed', bd.filter(function (x) { return x.status === 'Closed'; }).length], ['Downtime (hrs)', Math.round(mins / 6) / 10]]],
+      ['Permit to Work', [['Issued', pt.length], ['Open', pt.filter(function (x) { return x.status === 'Open'; }).length], ['Closed', pt.filter(function (x) { return x.status === 'Closed'; }).length], ['Cancelled', pt.filter(function (x) { return x.status === 'Cancelled'; }).length]]],
+      ['Checklists (PPM / Daily / DG)', [['Total', cl.length], ['Approved', cl.filter(function (x) { return x.status === 'Approved'; }).length], ['Waiting approval', cl.filter(function (x) { return /^Pending/.test(x.status); }).length], ['Rejected', cl.filter(function (x) { return x.status === 'Rejected'; }).length]]],
+      ['Major works', [['Raised', mw.length], ['Completed', mw.filter(function (x) { return x.status === 'done'; }).length], ['In progress', mw.filter(function (x) { return x.status !== 'done'; }).length]]],
+      ['Spares issued', [['Issue entries', iss.length], ['LOTO / Tag issues', iss.filter(function (l) { return l.cat === 'LOTO' || l.cat === 'Tag'; }).length]]]
+    ];
+  }
+  function fmtN(v, u) { return v === null || v === undefined ? '—' : v.toLocaleString(undefined, { maximumFractionDigits: 2 }) + ' ' + u; }
+  function renderMis() {
+    var el = $('mis-body'); if (!el) return;
+    var y = +misMonth.slice(0, 4), mo = +misMonth.slice(5, 7) - 1, list = misCons(y, mo), u = misUtil(list);
+    var h = '<div class="ghq-grid2" style="margin-bottom:8px"><input id="mis-month" type="month" class="ghq-input" value="' + misMonth + '" onchange="GHQ.misSet(this.value)">' + (canDownload() ? '<button class="btn-gold-solid" onclick="GHQ.misExcel()"><i class="fa-solid fa-file-excel"></i> Download Excel</button>' : '<span></span>') + '</div>';
+    u.forEach(function (s) {
+      h += '<div class="section-title"><span>' + s.site + ' · consumption</span></div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">' + s.rows.map(function (r) { return '<div class="op-item-card" style="flex:1;min-width:45%;text-align:center;padding:8px"><div style="font-size:.64rem;color:var(--text-muted)">' + r[0].toUpperCase() + '</div><div style="font-size:1.05rem;font-weight:700;color:var(--gold-light)">' + esc(fmtN(r[2], r[1])) + '</div></div>'; }).join('') + '</div>';
+    });
+    misOps(misMonth).forEach(function (g) {
+      h += '<div class="section-title"><span>' + g[0] + '</span></div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">' + g[1].map(function (r) { return '<div class="op-item-card" style="flex:1;min-width:22%;text-align:center;padding:8px"><div style="font-size:.62rem;color:var(--text-muted)">' + r[0].toUpperCase() + '</div><div style="font-size:1.05rem;font-weight:700;color:var(--gold-light)">' + r[1] + '</div></div>'; }).join('') + '</div>';
+    });
+    h += '<div class="section-title"><span>Panel-wise consumption</span><span style="font-size:.72rem;color:var(--cyan)">' + list.length + ' meters</span></div>';
+    if (!list.length) h += '<div class="ghq-note">No readings in this month.</div>';
+    var byP = {}; list.forEach(function (m) { var k = m.kind + '|' + m.panel; (byP[k] = byP[k] || []).push(m); });
+    Object.keys(byP).forEach(function (k) {
+      var arr = byP[k], t = 0; arr.forEach(function (m) { if (m.cons !== null) t += m.cons; });
+      h += '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(arr[0].panel) + '</span><span style="font-size:.8rem;font-weight:700;color:var(--gold-light)">' + esc(fmtN(Math.round(t * 100) / 100, arr[0].unit)) + '</span></div>' +
+        arr.map(function (m) { return '<div class="op-item-foot" style="padding:3px 0"><span style="font-size:.76rem;color:#e2e8f0">' + esc(m.feeder) + '</span><span style="font-size:.76rem">' + esc(fmtN(m.cons, m.unit)) + '</span></div>'; }).join('') + '</div>';
+    });
+    el.innerHTML = h;
+  }
+  function misSet(v) { if (/^\d{4}-\d\d$/.test(v)) { misMonth = v; renderMis(); } }
+  function misExcel() {
+    if (!canDownload()) { toast('Excel download is for Admin / Engineer / RIL / PM / APM'); return; }
+    var m = misMonth, y = +m.slice(0, 4), mo = +m.slice(5, 7) - 1, H = function (t) { return { v: t, s: 1 }; }, list = misCons(y, mo), u = misUtil(list), inM = function (d) { return String(d || '').slice(0, 7) === m; };
+    var sum = [[{ v: 'MIS REPORT · ' + new Date(y, mo, 1).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' }), s: 4 }], [], ['Site', 'Utility', 'Unit', 'Consumption'].map(H)];
+    u.forEach(function (s) { s.rows.forEach(function (r) { sum.push([s.site, r[0], r[1], r[2] === null ? '' : r[2]]); }); });
+    sum.push([], ['O&M summary', 'Item', 'Count'].map(H)); misOps(m).forEach(function (g) { g[1].forEach(function (r) { sum.push([g[0], r[0], r[1]]); }); });
+    var pc = [['Utility', 'Panel', 'Feeder / Meter', 'Unit', 'Consumption', 'Readings in month'].map(H)];
+    list.forEach(function (x) { pc.push([(READ[x.kind] || {}).label, x.panel, x.feeder, x.unit, x.cons === null ? '' : x.cons, x.n]); });
+    var bd = [BD_COLS.map(function (c) { return H(c[1]); })]; bdCache.filter(function (x) { return inM(x.date); }).reverse().forEach(function (x) { bd.push(BD_COLS.map(function (c) { return x[c[0]]; })); });
+    var pt = [PTW_COLS.map(function (c) { return H(c[1]); })]; ptwCache.filter(function (x) { return inM(x.date); }).reverse().forEach(function (x) { pt.push(PTW_COLS.map(function (c) { return x[c[0]]; })); });
+    var sp = [['Date', 'Item Code', 'Item Name', 'Category', 'Type', 'Qty', 'Used for / Equipment', 'Ref', 'Person'].map(H)]; spLog.filter(function (l) { return inM(l.date); }).reverse().forEach(function (l) { sp.push([fmtDate(l.date, l.date), l.code, l.name, l.cat, l.type, l.qty, l['for'], l.ref, l.person]); });
+    var sheets = [{ name: 'MIS Summary', cols: [26, 26, 12, 16], rows: sum, freeze: true }, { name: 'Panel Consumption', cols: [12, 26, 28, 8, 14, 14], rows: pc, freeze: true }, { name: 'Breakdowns', cols: BD_COLS.map(function () { return 18; }), rows: bd, freeze: true }, { name: 'PTW', cols: PTW_COLS.map(function () { return 16; }), rows: pt, freeze: true }, { name: 'Spares Movement', cols: [12, 10, 34, 10, 9, 8, 28, 22, 16], rows: sp, freeze: true }];
+    try { sheets = sheets.concat(buildPanelSheets(y, mo, allEvents().filter(function (e) { return e.type === 'reading'; }))); } catch (e) {}
+    saveBytes('GHQ_MIS_' + m + '.xlsx', XLSX_MIME, XlsxLite.build(sheets));
+  }
   function injectDailyLog() {
     if ($('screen-dlog')) return;
     var anchor = $('screen-readings'); if (!anchor) return;
@@ -897,9 +1066,11 @@
     window.openModule = function (id, tab) {
       if ((id === 'screen-users' || id === 'screen-backup') && !(session && session.role === 'admin')) { toast('Admin only'); return; }
       om(id, tab);
-      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dlog': 'Daily Log', 'screen-ptw': 'Permit to Work & LOTO', 'screen-bd': 'Breakdowns', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
+      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dlog': 'Daily Log', 'screen-ptw': 'Permit to Work & LOTO', 'screen-bd': 'Breakdowns', 'screen-sp': 'Spares & Consumables', 'screen-mis': 'MIS & Consumption', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
       if (id === 'screen-amc') { try { injectAmc(); } catch (e) {} pullAmcPpm(); }
+      if (id === 'screen-sp') { renderSp(); spBusy = true; spPull().then(function () { spBusy = false; renderSp(); }); }
+      if (id === 'screen-mis') { renderMis(); Promise.all([bdPull(), ptwPull(), spPull(), Promise.resolve().then(function () { return LOCAL ? 0 : pullAll(); }).catch(function () {})]).then(renderMis, renderMis); }
       if (id === 'screen-bd') { renderBd(); bdBusy = true; bdPull().then(function () { bdBusy = false; renderBd(); }); }
       if (id === 'screen-ptw') { renderPtw(); ptwBusy = true; ptwPull().then(function () { ptwBusy = false; renderPtw(); }); }
       if (id === 'screen-dlog') { renderDlog(); pullDtpl(); pullChecklists().then(renderDlog); }
@@ -955,7 +1126,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(bdPull).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(bdPull).then(spPull).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -2694,11 +2865,11 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, bdGo: bdGo, bdForm: bdForm, bdSave: bdSave, bdExcel: bdExcel, bdFilter: bdFilter, bdSearch: bdSearch, _bdSet: function (a) { bdCache = a; renderBd(); paintBdDash(); }, ptwGo: ptwGo, ptwSwitch: ptwSwitch, ptwSearch: ptwSearch, ptwForm: ptwForm, ptwSave: ptwSave, ptwClose: ptwClose, ptwReopen: ptwReopen, ptwSet: ptwSet, lotoForm: lotoForm, lotoSave: lotoSave, ptwExcel: ptwExcel, _ptwSet: function (a, b) { ptwCache = a; lotoCache = b; renderPtw(); }, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, spSet: spSet, spItemForm: spItemForm, spItemSave: spItemSave, spTxnForm: spTxnForm, spTxnSave: spTxnSave, spExcel: spExcel, misSet: misSet, misExcel: misExcel, _spSet: function (a, b) { spItems = a; spLog = b || []; renderSp(); }, _misMonth: function (m) { misMonth = m; renderMis(); }, bdGo: bdGo, bdForm: bdForm, bdSave: bdSave, bdExcel: bdExcel, bdFilter: bdFilter, bdSearch: bdSearch, _bdSet: function (a) { bdCache = a; renderBd(); paintBdDash(); }, ptwGo: ptwGo, ptwSwitch: ptwSwitch, ptwSearch: ptwSearch, ptwForm: ptwForm, ptwSave: ptwSave, ptwClose: ptwClose, ptwReopen: ptwReopen, ptwSet: ptwSet, lotoForm: lotoForm, lotoSave: lotoSave, ptwExcel: ptwExcel, _ptwSet: function (a, b) { ptwCache = a; lotoCache = b; renderPtw(); }, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
-  injectDailyLog(); injectPtw(); injectBd(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
+  injectDailyLog(); injectPtw(); injectBd(); injectSpares(); injectMis(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
   idbOpen().then(qAll).then(function (q) {
     queue = q;
     if (NOT_CONFIGURED) { showLogin(''); return; }
