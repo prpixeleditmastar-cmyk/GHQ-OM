@@ -56,5 +56,16 @@ b = b.replace('<link href="app-layer.css" rel="stylesheet">', () => '<style>' + 
 fs.mkdirSync(upd, { recursive: true });
 fs.writeFileSync(path.join(upd, 'version.json'), JSON.stringify({ version: BUILD }));
 fs.writeFileSync(path.join(upd, 'bundle.json'), JSON.stringify({ version: BUILD, html: b }));
+// laptop / desktop browser version (Admin): the same app with build + server settings inlined, published at <update address>web/
+try {
+  const web = path.join(upd, 'web'); fs.mkdirSync(web, { recursive: true });
+  let w = b;
+  [['build.js', '<script src="build.js"></script>'], ['config.js', '<script src="config.js"></script>']].forEach(([f, tag]) => {
+    const fp = path.join(out, f);
+    if (w.includes(tag) && fs.existsSync(fp)) w = w.replace(tag, () => '<script>' + inl(fs.readFileSync(fp, 'utf8')) + '</script>');
+  });
+  w = w.replace('<head>', '<head><script>window.GHQ_WEB=true;</script>');
+  fs.writeFileSync(path.join(web, 'index.html'), w);
+} catch (e) { console.log('web version skipped: ' + e.message); }
 fs.writeFileSync(path.join(upd, 'index.html'), '<!doctype html><meta charset="utf-8"><title>GHQ O&M updates</title><p>GHQ O&M app update feed. Version ' + BUILD + '</p>');
 console.log('dist ready · build ' + BUILD + (UPDATE_URL ? ' · updates from ' + UPDATE_URL : ' · (no UPDATE_URL: auto-update off)'));
