@@ -44,9 +44,10 @@
   .app-container { max-width: none; width: auto; margin-left: 300px; border: 0; box-shadow: none; padding-bottom: 30px; }
   .sidebar { left: 0 !important; width: 300px; box-shadow: none; }
   .sidebar-overlay { display: none !important; }
-  .bottom-nav { display: none !important; }
+  .bottom-nav { position: sticky; top: 0; bottom: auto; order: -1; max-width: none; width: 100%; justify-content: flex-start; gap: 6px; padding: 8px 32px; z-index: 40; }
+  .bottom-nav .nav-item { flex: 0 0 auto; flex-direction: row; gap: 8px; padding: 8px 18px; border-radius: 8px; font-size: .95rem; }
   .menu-btn { display: none !important; }
-  .top-bar { padding: 16px 32px; position: sticky; top: 0; z-index: 30; }
+  .top-bar { padding: 16px 32px; }
   .screen-view { padding: 24px 32px; width: 100%; max-width: 1280px; margin: 0 auto; }
   .metric-grid-4 { grid-template-columns: repeat(4, 1fr); gap: 14px; }
   #bd-body, #ptw-body, #sp-body, #mis-body, #dlog-body, #amc-body { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 12px; align-items: start; }
