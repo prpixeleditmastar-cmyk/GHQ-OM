@@ -96,11 +96,11 @@
     });
   }
   function resetArr(target, src) { target.length = 0; clone(src).forEach(function (x) { target.push(x); }); }
-  var majorList = [], dailyLog = {}, dailyTpl = LS.get('ghq_dtpl', []);
+  var amcPpmCache = LS.get('ghq_amcppm', []), majorList = [], dailyLog = {}, dailyTpl = LS.get('ghq_dtpl', []);
   function resetState() {
     resetObj(elecData, BASE.elec, 'elec'); resetObj(waterData, BASE.water, 'water'); resetObj(btuData, BASE.btu, 'btu');
     if (CFG.KEEP_DEMO_TICKETS) resetArr(ticketDatabase, BASE.tickets); else ticketDatabase.length = 0;
-    resetArr(amcMasterDatabase, BASE.amc); resetArr(amcPPMSchedules, BASE.ppm);
+    resetArr(amcMasterDatabase, BASE.amc); amcPPMSchedules.length = 0; (amcPpmCache || []).forEach(function (x) { amcPPMSchedules.push(amcMap(x)); });
     ppmLog = {}; ppmLogId = {}; roster = {}; rosterPdf = {}; majorList.length = 0; dailyLog = {};
   }
 
@@ -138,7 +138,6 @@
       t.holdDays = holdDaysFrom(t.holdStartDate);
     } else if (ev.type === 'amc.create' && d.amc) {
       amcMasterDatabase.unshift(clone(d.amc));
-      if (d.ppm) amcPPMSchedules.unshift(clone(d.ppm));
     } else if (ev.type === 'ppm.checklist') {
       (ppmLog[d.key] = ppmLog[d.key] || []).push(d.date); ppmLogId[d.key + '|' + d.date] = ev.id;
     } else if (ev.type === 'roster.set') {
@@ -367,6 +366,146 @@
     }
     commit('daily.log', d).then(function () { try { LS.del('ghq_dl_' + d.dkey); } catch (e) {} closeModal(); toast('✔ Submitted — sent to Supervisor for approval'); renderDlog(); });
   }
+  /* ================= AMC & Vendor PPM ================= */
+  var AMC_CATS = ['HVAC', 'Electrical', 'Elevator', 'Water'], AMC_ICON = { HVAC: ['fa-snowflake', '#38bdf8'], Electrical: ['fa-bolt', '#eab308'], Elevator: ['fa-elevator', '#a855f7'], Water: ['fa-faucet-drip', '#34d399'] };
+  function amcMap(x) {
+    return { id: x.id, cat: x.cat, vendor: x.vendor, equip: x.equip, tag: x.tag || '—', freq: x.freq, lastPPM: x.last ? fmtDate(x.last, '') : '—', nextPPM: fmtDate(x.next, ''), daysRemaining: x.days, status: x.status,
+      opwo: x.opwo || '', file: x.file || '', reportAvail: !!x.file, checklistAvail: true, _last: x.last || '', _next: x.next };
+  }
+  function amcApply() {
+    amcPPMSchedules.length = 0; (amcPpmCache || []).forEach(function (x) { amcPPMSchedules.push(amcMap(x)); });
+    var mon = ymdOf(new Date()).slice(0, 7);
+    equipWiseStatusData.length = 0;
+    AMC_CATS.forEach(function (c) {
+      var L = amcPPMSchedules.filter(function (a) { return a.cat === c; });
+      equipWiseStatusData.push({ system: c, icon: AMC_ICON[c][0], color: AMC_ICON[c][1], total: L.length,
+        done: L.filter(function (a) { return a.status !== 'overdue' && String(a._last).slice(0, 7) === mon; }).length, due: L.filter(function (a) { return a.status === 'due'; }).length, overdue: L.filter(function (a) { return a.status === 'overdue'; }).length });
+    });
+    try { renderAMCDashboard(); renderPPMSchedules(); } catch (e) {}
+    try { renderOps(); } catch (e) {}
+  }
+  function pullAmcPpm() {
+    if (LOCAL || !session) return Promise.resolve();
+    return api('amcppm_list').then(function (r) { if (r && r.ok && Array.isArray(r.list)) { amcPpmCache = r.list; LS.set('ghq_amcppm', amcPpmCache); amcApply(); } }).catch(function () {});
+  }
+  function amcBox(h) { modal(h); }
+  function amcView(id) {
+    var a = amcPPMSchedules.filter(function (x) { return x.id === id; })[0]; if (!a) return;
+    var row = function (l, v) { return '<div style="display:flex;justify-content:space-between;gap:8px;font-size:.8rem;padding:3px 0"><span style="color:var(--text-muted)">' + l + '</span><b style="text-align:right">' + esc(v || '—') + '</b></div>'; };
+    var h = '<h3 class="ghq-h3">' + esc(a.equip) + '</h3>' + row('Tag', a.tag) + row('Category', a.cat) + row('Vendor', a.vendor) + row('Frequency', a.freq) + row('Op/WO no.', a.opwo) + row('Last PPM', a.lastPPM) + row('Next PPM', a.nextPPM) +
+      (a.file ? '<a class="ghq-btn ghost" style="display:block;text-align:center;margin-top:8px" href="' + esc(a.file) + '" target="_blank" rel="noopener">Open last vendor checklist</a>' : '<div class="ghq-note">No vendor checklist uploaded yet.</div>');
+    if (canHold()) h += '<div class="sub-section-header" style="margin-top:12px">Upload vendor checklist</div><div class="ghq-note">This PPM moves to the next date only after the vendor checklist is uploaded with the PPM date.</div>' +
+      '<label class="ghq-lbl">PPM done date *</label><input id="ap-date" class="ghq-input" type="date" value="' + ymdOf(new Date()) + '">' +
+      '<div class="ghq-grid2" style="margin-top:6px"><label class="ghq-btn" style="text-align:center;cursor:pointer"><input id="ap-cam" type="file" accept="image/*" capture="environment" style="display:none" onchange="GHQ.amcPick(this)"> Scan (camera)</label>' +
+      '<label class="ghq-btn ghost" style="text-align:center;cursor:pointer"><input id="ap-file" type="file" accept="image/*,application/pdf" style="display:none" onchange="GHQ.amcPick(this)"> Choose file / PDF</label></div>' +
+      '<div id="ap-name" class="ghq-note">No file selected</div><label class="ghq-lbl">Remarks</label><input id="ap-rem" class="ghq-input" placeholder="Optional">' +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" onclick="GHQ.amcUpload(\'' + esc(id) + '\')">Upload &amp; save</button></div>';
+    else h += '<button class="ghq-btn ghost" style="margin-top:8px" onclick="GHQ.closeModal()">Close</button>';
+    amcBox(h); window._apFile = null;
+  }
+  function amcPick(inp) { var f = inp.files && inp.files[0]; if (!f) return; window._apFile = f; var n = $('ap-name'); if (n) n.textContent = '✔ ' + f.name + ' (' + Math.round(f.size / 1024) + ' KB)'; }
+  function amcReadFile(f) {                            // image -> compressed JPEG, pdf -> as is
+    return new Promise(function (res, rej) {
+      if (/pdf/i.test(f.type)) {
+        if (f.size > 6e6) { rej(new Error('PDF is too large (max 6 MB)')); return; }
+        var fr = new FileReader(); fr.onload = function () { res({ mime: 'application/pdf', b64: String(fr.result).split(',')[1] }); }; fr.onerror = function () { rej(new Error('Could not read file')); }; fr.readAsDataURL(f); return;
+      }
+      var url = URL.createObjectURL(f), im = new Image();
+      im.onload = function () {
+        var sc = Math.min(1, 1800 / Math.max(im.width, im.height)), c = document.createElement('canvas'); c.width = Math.round(im.width * sc); c.height = Math.round(im.height * sc);
+        c.getContext('2d').drawImage(im, 0, 0, c.width, c.height); URL.revokeObjectURL(url); res({ mime: 'image/jpeg', b64: c.toDataURL('image/jpeg', 0.8).split(',')[1] });
+      };
+      im.onerror = function () { URL.revokeObjectURL(url); rej(new Error('Could not read the picture')); }; im.src = url;
+    });
+  }
+  function amcUpload(id) {
+    var f = window._apFile, date = ($('ap-date') || {}).value;
+    if (!date) { toast('Enter the PPM done date'); return; }
+    if (!f) { toast('Scan or choose the vendor checklist'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    toast('Uploading…');
+    amcReadFile(f).then(function (x) { return api('amcppm_done', { id: id, date: date, mime: x.mime, b64: x.b64, rem: ($('ap-rem') || {}).value || '' }); }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      closeModal(); toast('✔ Saved — next PPM ' + fmtDate(r.next, r.next)); return pullAmcPpm();
+    }).catch(function (e) { toast('Error: ' + (e && e.message || e)); });
+  }
+  function amcAddForm() {
+    if (!canHold()) { toast('Only Supervisor / Engineer / Admin'); return; }
+    function f(i, l, t, ph) { return '<label class="ghq-lbl">' + l + '</label><input id="aa-' + i + '" class="ghq-input"' + (t ? ' type="' + t + '"' : '') + ' placeholder="' + esc(ph || '') + '">'; }
+    modal('<h3 class="ghq-h3">Add vendor PPM</h3><label class="ghq-lbl">Category *</label><select id="aa-cat" class="cal-select" style="width:100%">' + AMC_CATS.map(function (c) { return '<option>' + c + '</option>'; }).join('') + '</select>' +
+      f('vendor', 'Vendor *', '', 'e.g. Johnson Controls') + f('equip', 'Equipment *', '', 'e.g. Centrifugal Chiller 01 (400 TR)') + f('tag', 'Tag no.', '', 'e.g. CH-01') +
+      '<div class="ghq-grid2"><div><label class="ghq-lbl">Frequency</label><select id="aa-freq" class="cal-select" style="width:100%">' + ['Monthly', 'Quarterly', 'Half-yearly', 'Yearly', 'Fortnightly', 'Weekly'].map(function (c) { return '<option>' + c + '</option>'; }).join('') + '</select></div><div>' + f('last', 'Last PPM done', 'date') + '</div></div>' +
+      f('opwo', 'Op/WO no.', '', 'Type the order no.') + f('rem', 'Remarks', '', '') +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button><button class="ghq-btn" onclick="GHQ.amcAddSave()">Save</button></div>');
+  }
+  function amcAddSave() {
+    var g = function (k) { return ($('aa-' + k) || {}).value || ''; }, e = { cat: g('cat'), vendor: g('vendor').trim(), equip: g('equip').trim(), tag: g('tag').trim(), freq: g('freq'), last: g('last'), opwo: g('opwo').trim(), rem: g('rem').trim() };
+    if (!e.vendor || !e.equip) { toast('Enter vendor and equipment'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    api('amcppm_add', { e: e }).then(function (r) { if (!r.ok) throw new Error(r.error || 'error'); closeModal(); toast('✔ Added'); return pullAmcPpm(); })
+      .catch(function (er) { toast('Error: ' + (er && er.message || er)); });
+  }
+  function amcExcel() {
+    if (!canDownload()) { toast('Excel download is for Admin / Engineer / RIL / PM / APM'); return; }
+    var m = ($('amc-month') || {}).value || ymdOf(new Date()).slice(0, 7);
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    toast('Preparing…');
+    api('amcppm_log', { month: m }).then(function (r) {
+      if (!r.ok) throw new Error(r.error || 'error');
+      var H = function (t) { return { v: t, s: 1 }; }, y = +m.slice(0, 4), mo = +m.slice(5, 7), end = ymdOf(new Date(y, mo, 0, 12)), today = ymdOf(new Date()), done = {}, rows = [], n = 0;
+      rows.push(['Sr', 'Category', 'Vendor', 'Equipment', 'Tag', 'Op/WO no.', 'Frequency', 'PPM date', 'Next PPM', 'Status', 'Vendor checklist', 'Remarks', 'Uploaded by'].map(H));
+      (r.log || []).sort(function (a, b) { return a.date < b.date ? -1 : 1; }).forEach(function (x) {
+        var a = amcPpmCache.filter(function (z) { return z.id === x.id; })[0] || {}; done[x.id] = 1; n++;
+        rows.push([n, x.cat, x.vendor, x.equip, x.tag, a.opwo || '', a.freq || '', fmtDate(x.date, x.date), fmtDate(x.next, x.next), 'Done', x.url, x.rem, x.by]);
+      });
+      amcPpmCache.forEach(function (a) {
+        if (done[a.id] || a.next > end) return; n++;
+        rows.push([n, a.cat, a.vendor, a.equip, a.tag, a.opwo || '', a.freq, '', fmtDate(a.next, a.next), (a.next < today ? 'Overdue' : 'Due'), '', a.rem || '', '']);
+      });
+      var sum = [['Category', 'Done', 'Pending / Overdue'].map(H)];
+      AMC_CATS.forEach(function (c) { var d = rows.filter(function (x, i) { return i > 0 && x[1] === c && x[9] === 'Done'; }).length, p = rows.filter(function (x, i) { return i > 0 && x[1] === c && x[9] !== 'Done'; }).length; sum.push([c, d, p]); });
+      saveBytes('AMC_PPM_' + m + '.xlsx', XLSX_MIME, XlsxLite.build([{ name: 'AMC PPM ' + m, cols: [5, 12, 22, 34, 16, 16, 12, 13, 13, 10, 40, 24, 14], rows: rows, freeze: true }, { name: 'Summary', cols: [16, 10, 18], rows: sum, freeze: true }]));
+    }).catch(function (e) { toast('Error: ' + (e && e.message || e)); });
+  }
+  function injectAmc() {
+    // Dashboard names
+    var panel = $('tab-amc-ppm');
+    if (panel && !$('amc-ppm-tools')) {
+      panel.insertAdjacentHTML('afterbegin', '<div id="amc-ppm-tools" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;align-items:center"><button class="btn-gold-solid" id="amc-add-btn" onclick="GHQ.amcAddForm()"><i class="fa-solid fa-plus"></i> Add vendor PPM</button>' +
+        '<span id="amc-xl" style="display:flex;gap:6px;align-items:center"><input id="amc-month" type="month" class="cal-select" style="font-size:.8rem;padding:6px 8px" value="' + ymdOf(new Date()).slice(0, 7) + '"><button class="btn-gold-outline" onclick="GHQ.amcExcel()">Monthly Excel</button></span></div>');
+    }
+    var ab = $('amc-add-btn'); if (ab) ab.style.display = canHold() ? '' : 'none';
+    var xl = $('amc-xl'); if (xl) xl.style.display = canDownload() ? 'flex' : 'none';
+    // New AMC: Op/WO no.
+    var sc = $('new-amc-scope');
+    if (sc && !$('new-amc-opwo')) sc.parentNode.insertAdjacentHTML('beforebegin', '<div><label style="font-size:0.72rem; color:var(--text-muted); font-weight:600; display:block; margin-bottom:2px;">Op/WO No.</label><input type="text" id="new-amc-opwo" placeholder="Type the order no." class="cal-select" style="width:100%; font-size:0.82rem; padding:8px 10px;"></div>');
+    // Renew: no annual value
+    var rv = $('renew-value'); if (rv && rv.parentNode) rv.parentNode.style.display = 'none';
+  }
+  (function wrapAmc() {
+    var rm = window.renderAMCMaster;
+    window.renderAMCMaster = function (items) {
+      rm(items);
+      try {
+        var list = items || amcMasterDatabase, box = $('amc-master-container');
+        if (box) Array.prototype.forEach.call(box.children, function (card, i) { var a = list[i]; if (a && a.opwo) card.insertAdjacentHTML('beforeend', '<div class="op-item-desc" style="padding:4px 12px 8px">Op/WO no.: <b>' + esc(a.opwo) + '</b></div>'); });
+      } catch (e) {}
+    };
+    var rp = window.renderPPMSchedules;
+    window.renderPPMSchedules = function () {
+      rp();
+      try {
+        var f = window.currentPPMSchedFilter, list = (f && f !== 'all') ? amcPPMSchedules.filter(function (x) { return x.status === f; }) : amcPPMSchedules, box = $('ppm-schedule-container');
+        if (box) Array.prototype.forEach.call(box.querySelectorAll('.ppm-sched-card'), function (card, i) {
+          var a = list[i]; if (!a) return; var ft = card.querySelector('.ppm-sched-foot span');
+          if (ft) { ft.innerHTML = a.file ? '<i class="fa-solid fa-file-circle-check"></i> Vendor checklist uploaded' : '<i class="fa-solid fa-hourglass-half"></i> Vendor checklist pending'; ft.style.color = a.file ? '#34d399' : '#fbbf24'; }
+          var bt = card.querySelector('.ppm-sched-foot button'); if (bt) bt.textContent = canHold() ? 'Checklist / Scan' : 'View Checklist';
+          if (a.opwo) card.querySelector('.ppm-sched-equip').insertAdjacentHTML('afterend', '<div class="op-item-desc">Op/WO no.: ' + esc(a.opwo) + '</div>');
+        });
+      } catch (e) {}
+    };
+    window.viewPPMChecklist = function (id) { amcView(id); };
+  })();
   /* ================= Daily Operations: Electrical / HVAC / Plumbing (PM today · Major work · Pending) ================= */
   var OPS = {
     elec: { screen: 'screen-electrical', name: 'Electrical', pre: 'E' },
@@ -479,7 +618,7 @@
       }).join('') : '<div class="ghq-note">No pending E-Tickets.</div>'); n += tk.length;
     var am = (typeof amcPPMSchedules !== 'undefined' ? amcPPMSchedules : []).filter(function (a) {
       if (!(a.status === 'overdue' || a.daysRemaining < 0)) return false;
-      var txt = (a.equip || '') + ' ' + (a.tag || '') + ' ' + (a.vendor || ''), cls = ['hvac', 'plumb', 'elec'].filter(function (o) { return AMC_KW[o].test(txt); })[0];
+      var cm = { Electrical: 'elec', Elevator: 'elec', HVAC: 'hvac', Water: 'plumb' }, cls = a.cat ? cm[a.cat] : ['hvac', 'plumb', 'elec'].filter(function (o) { return AMC_KW[o].test((a.equip || '') + ' ' + (a.tag || '') + ' ' + (a.vendor || '')); })[0];
       return cls === k;
     });
     h += '<div class="section-title" style="margin-top:14px"><span>Pending AMC PPM</span><span style="font-size:0.72rem;color:var(--danger)">' + am.length + '</span></div>' +
@@ -531,6 +670,7 @@
       om(id, tab);
       var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dlog': 'Daily Log', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
+      if (id === 'screen-amc') { try { injectAmc(); } catch (e) {} pullAmcPpm(); }
       if (id === 'screen-dlog') { renderDlog(); pullDtpl(); pullChecklists().then(renderDlog); }
       if (id === 'screen-ppm') renderPPM();
       if (id === 'screen-electrical' || id === 'screen-hvac' || id === 'screen-plumbing') { try { renderOps(); } catch (e) {} }
@@ -584,7 +724,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -796,9 +936,8 @@
     if (!person || !phone) { alert('Please enter Contact Person Name & Phone Number!'); return; }
     var id = 'AMC-' + Math.random().toString(36).slice(2, 6).toUpperCase();
     var start = fmtDate($('new-amc-start').value, fmtDate(new Date().toISOString(), '')), end = fmtDate($('new-amc-end').value, start);
-    var amc = { id: id, vendor: vendor, system: system, qty: qty, start: start, end: end, status: 'Active', freq: freq, contactPerson: person, phone: phone, email: email, scope: scope };
-    var ppm = { id: 'PPM-' + id, vendor: vendor, equip: system + ' Bank (' + qty + ' Units)', tag: 'EQ-' + id, freq: freq, lastPPM: start, nextPPM: end, daysRemaining: 30, status: 'upcoming', reportAvail: true, checklistAvail: true };
-    commit('amc.create', { amc: amc, ppm: ppm }).then(function () { closeNewAMCModal(); toast('✔ AMC ' + id + ' registered'); });
+    var amc = { id: id, vendor: vendor, system: system, qty: qty, start: start, end: end, status: 'Active', freq: freq, contactPerson: person, phone: phone, email: email, scope: scope, opwo: ($('new-amc-opwo') || {}).value ? $('new-amc-opwo').value.trim() : '' };
+    commit('amc.create', { amc: amc }).then(function () { closeNewAMCModal(); toast('✔ AMC ' + id + ' registered'); });
   };
 
   window.submitRenewAMC = function () {
@@ -2324,11 +2463,11 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
-  injectDailyLog(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
+  injectDailyLog(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
   idbOpen().then(qAll).then(function (q) {
     queue = q;
     if (NOT_CONFIGURED) { showLogin(''); return; }
