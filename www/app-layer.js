@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.3 · build ' + BUILD;
+  var VERSION = 'v8.4 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -324,8 +324,8 @@
   }
   function ptwForm() {
     function f(i, l, v, t, ph) { return '<label class="ghq-lbl">' + l + '</label><input id="ptw-' + i + '" class="ghq-input"' + (t ? ' type="' + t + '"' : '') + ' value="' + esc(v || '') + '" placeholder="' + esc(ph || '') + '">'; }
-    modal('<h3 class="ghq-h3">Work Permit (PTW)</h3><div class="ghq-note">PTW No. is generated automatically on save.</div>' +
-      '<div class="ghq-grid2"><div>' + f('date', 'PTW Date *', ymdOf(new Date()), 'date') + '</div><div>' + f('dept', 'Dept.', 'GHQ') + '</div></div>' +
+    modal('<h3 class="ghq-h3">Work Permit (PTW)</h3><div class="ghq-note">Type the PTW No., or leave it blank and it is generated on save.</div>' +
+      f('no', 'PTW No.', '', '', 'Leave blank for automatic number') + '<div class="ghq-grid2"><div>' + f('date', 'PTW Date *', ymdOf(new Date()), 'date') + '</div><div>' + f('dept', 'Dept.', 'GHQ') + '</div></div>' +
       '<label class="ghq-lbl">Job Description *</label><textarea id="ptw-job" class="ghq-input" rows="3"></textarea>' +
       '<label class="ghq-lbl">Type of work</label><select id="ptw-type" class="cal-select" style="width:100%">' + PTW_TYPES.map(function (x) { return '<option>' + x + '</option>'; }).join('') + '</select>' +
       f('acceptor', 'Acceptor name') + f('vendor', 'Vendor Name') + f('people', 'No. of personnel', '', 'number') + f('issuer', 'Issuer', session && session.name) + f('approver', 'Approver') + f('sup', 'Supervision') +
@@ -334,7 +334,7 @@
   }
   function ptwSave() {
     var g = function (x) { return (($('ptw-' + x) || {}).value || '').trim(); }, e = {};
-    ['date', 'dept', 'job', 'type', 'acceptor', 'vendor', 'people', 'issuer', 'approver', 'sup', 'status', 'till'].forEach(function (k) { e[k] = g(k); });
+    ['no', 'date', 'dept', 'job', 'type', 'acceptor', 'vendor', 'people', 'issuer', 'approver', 'sup', 'status', 'till'].forEach(function (k) { e[k] = g(k); });
     if (!e.job) { toast('Enter the job description'); return; }
     if (!e.date) { toast('Enter the PTW date'); return; }
     if (!navigator.onLine) { toast('Internet required to save a PTW'); return; }
@@ -399,6 +399,97 @@
       sheet = { name: 'LOTO_Register', cols: [6, 10].concat(LOTO_F.map(function () { return 20; })).concat([14]), rows: rows, freeze: true };
     }
     saveBytes((P ? 'PTW_' : 'LOTO_Register_') + stamp() + '.xlsx', XLSX_MIME, XlsxLite.build([sheet]));
+  }
+
+  /* ===== Equipment Breakdowns ===== */
+  var bdCache = LS.get('ghq_bd', []), bdQ = '', bdFilt = 'Open', bdBusy = false;
+  var BD_COLS = [['id', 'Incident ID'], ['date', 'Date'], ['equip', 'Equipment Name'], ['tag', 'Asset Tag'], ['area', 'Location / Area'], ['issue', 'Issue / Failure Description'], ['cause', 'Root Cause'], ['action', 'Corrective Action Taken'], ['parts', 'Spare Parts Used'], ['tech', 'Technician Name'], ['sd', 'Breakdown Start Date'], ['st', 'Breakdown Start Time'], ['ed', 'Breakdown End Date'], ['et', 'Breakdown End Time'], ['mins', 'Downtime (Minutes)'], ['status', 'Status'], ['signoff', 'Supervisor Sign-off']];
+  function injectBd() {
+    if ($('screen-bd')) return;
+    var anchor = $('screen-ptw') || $('screen-dlog') || $('screen-readings'); if (!anchor) return;
+    anchor.insertAdjacentHTML('afterend', '<section class="screen-view" id="screen-bd"><div class="op-screen-header"><button class="op-back-btn" onclick="openModule(\'screen-dashboard\')"><i class="fa-solid fa-arrow-left"></i> Dashboard</button><div class="op-title-area" style="text-align:right"><h2><i class="fa-solid fa-triangle-exclamation"></i> Breakdowns</h2><p>Equipment breakdown tracker</p></div></div><div id="bd-body"></div></section>');
+    var ptwItem = null;
+    Array.prototype.forEach.call(document.querySelectorAll('.menu-item'), function (el) { if (/Permit to Work/i.test(el.textContent)) ptwItem = el; });
+    if (ptwItem && !document.getElementById('menu-bd')) ptwItem.insertAdjacentHTML('beforebegin', '<div class="menu-item" id="menu-bd" onclick="openModule(\'screen-bd\')"><i class="fa-solid fa-triangle-exclamation"></i><span>Breakdowns</span></div>');
+    Array.prototype.forEach.call(document.querySelectorAll('.section-title'), function (t) {
+      var sp = t.querySelector('span'); if (!sp || !/Critical Tasks/i.test(sp.textContent)) return;
+      var sec = t.parentNode; sec.id = 'bd-dash'; sp.textContent = 'Breakdowns';
+      var cnt = t.querySelectorAll('span')[1]; if (cnt) cnt.id = 'bd-dash-n';
+      Array.prototype.slice.call(sec.children).forEach(function (c) { if (c !== t) c.remove(); });
+      sec.insertAdjacentHTML('beforeend', '<div id="bd-dash-list"></div>');
+    });
+    paintBdDash();
+  }
+  function bdOpenList() { return bdCache.filter(function (x) { return x.status !== 'Closed'; }); }
+  function paintBdDash() {
+    var el = $('bd-dash-list'); if (!el) return;
+    var o = bdOpenList(), n = $('bd-dash-n'); if (n) n.textContent = o.length + ' Open';
+    el.innerHTML = '<div class="op-item-top" style="margin-bottom:8px"><span style="font-size:.72rem;color:var(--text-muted)">OPEN BREAKDOWNS</span><span style="font-size:1.1rem;font-weight:700;color:' + (o.length ? '#f87171' : '#34d399') + '">' + o.length + '</span></div>' +
+      (o.length ? o.slice(0, 5).map(function (x) { return '<div class="task-card" style="background:var(--card-bg);border-radius:10px;padding:12px;border:1px solid var(--border-gold);display:flex;align-items:center;justify-content:space-between;margin-bottom:8px"><div style="display:flex;flex-direction:column;gap:3px;min-width:0"><span class="tag-badge tag-pending" style="width:fit-content">' + esc(x.id) + '</span><span style="font-size:.86rem;font-weight:600;color:var(--text-white)">' + esc(x.equip) + '</span><span style="font-size:.72rem;color:var(--text-muted)">' + esc(x.issue) + '</span></div><button class="btn-gold-solid" onclick="GHQ.bdGo()">View</button></div>'; }).join('') + (o.length > 5 ? '<button class="btn-gold-outline" onclick="GHQ.bdGo()">View all ' + o.length + '</button>' : '') : '<div class="ghq-note">No open breakdowns.</div>');
+  }
+  function bdPull() {
+    if (!navigator.onLine) return Promise.resolve();
+    return api('bd_list', {}).then(function (r) { if (r && r.ok) { bdCache = r.list || []; LS.set('ghq_bd', bdCache.slice(0, 300)); } }).catch(function () {}).then(paintBdDash);
+  }
+  function bdGo(f) { if (f) bdFilt = f; openModule('screen-bd'); }
+  function bdSearch(v) { bdQ = String(v || '').toLowerCase(); renderBd(true); }
+  function bdFilter(f) { bdFilt = f; renderBd(); }
+  function renderBd(keepFocus) {
+    var el = $('bd-body'); if (!el) return;
+    var list = bdCache.filter(function (x) { return (bdFilt === 'All' || (bdFilt === 'Open') === (x.status !== 'Closed')) && (!bdQ || JSON.stringify(x).toLowerCase().indexOf(bdQ) >= 0); });
+    var no = bdOpenList().length, tot = bdCache.length, cl = tot - no, dm = 0, dn = 0;
+    bdCache.forEach(function (x) { if (x.mins !== '' && !isNaN(Number(x.mins))) { dm += Number(x.mins); dn++; } });
+    function kp(l, v) { return '<div class="op-item-card" style="flex:1;min-width:30%;text-align:center;padding:8px"><div style="font-size:.62rem;color:var(--text-muted)">' + l + '</div><div style="font-size:1.1rem;font-weight:700;color:var(--gold-light)">' + v + '</div></div>'; }
+    var h = '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">' + kp('TOTAL', tot) + kp('OPEN', no) + kp('CLOSED', cl) + kp('DOWNTIME (MIN)', dm) + kp('AVG (HRS)', dn ? (dm / dn / 60).toFixed(1) : '0') + '</div>' +
+      '<div class="ghq-grid2" style="margin-bottom:8px"><button class="btn-gold-solid" onclick="GHQ.bdForm()"><i class="fa-solid fa-plus"></i> New Breakdown</button>' + (canDownload() ? '<button class="btn-gold-solid" onclick="GHQ.bdExcel()"><i class="fa-solid fa-file-excel"></i> Download Excel</button>' : '<span></span>') + '</div>' +
+      '<div style="display:flex;gap:6px;margin-bottom:8px">' + ['Open', 'Closed', 'All'].map(function (f) { return '<button class="ghq-btn' + (bdFilt === f ? '' : ' ghost') + '" onclick="GHQ.bdFilter(\'' + f + '\')">' + f + '</button>'; }).join('') + '</div>' +
+      '<input id="bd-q" class="ghq-input" placeholder="Search…" value="' + esc(bdQ) + '" oninput="GHQ.bdSearch(this.value)">';
+    if (!navigator.onLine) h += '<div class="ghq-note">Offline — showing last saved list. New entries need internet.</div>';
+    if (!list.length) h += '<div class="ghq-note">' + (bdBusy ? 'Loading…' : 'No breakdowns.') + '</div>';
+    list.slice(0, 120).forEach(function (x) {
+      var open = x.status !== 'Closed';
+      h += '<div class="op-item-card"><div class="op-item-top"><span class="tag-badge tag-pm">' + esc(x.id) + '</span><span style="font-size:.75rem;color:' + (open ? '#f87171' : '#34d399') + '">' + (open ? 'Open' : 'Closed') + '</span></div>' +
+        '<div class="op-item-desc">' + esc(x.equip) + (x.tag ? ' · ' + esc(x.tag) : '') + '</div><div class="ghq-note" style="margin:2px 0">' + esc(x.area) + ' · ' + esc(fmtDate(x.date, x.date)) + '</div>' +
+        '<div class="ghq-note" style="margin:2px 0">' + esc(x.issue) + '</div>' +
+        (x.cause ? '<div class="ghq-note" style="margin:2px 0">Cause: ' + esc(x.cause) + '</div>' : '') + (x.action ? '<div class="ghq-note" style="margin:2px 0">Action: ' + esc(x.action) + '</div>' : '') +
+        '<div class="ghq-note" style="margin:2px 0">Start ' + esc((x.sd ? fmtDate(x.sd, x.sd) : '—') + ' ' + (x.st || '')) + (open ? '' : ' · End ' + esc(fmtDate(x.ed, x.ed) + ' ' + x.et) + ' · ' + esc(x.mins) + ' min') + (x.signoff ? ' · Sign-off: ' + esc(x.signoff) : '') + '</div>' +
+        '<div class="op-item-foot"><span class="ghq-note" style="margin:0">' + (x.tech ? 'Tech: ' + esc(x.tech) : '') + '</span><span><button class="btn-gold-solid" onclick="GHQ.bdForm(' + x.r + ')">' + (open ? 'Update / Close' : 'View / Edit') + '</button></span></div></div>';
+    });
+    el.innerHTML = h;
+    if (keepFocus) { var q = $('bd-q'); if (q) { q.focus(); try { q.setSelectionRange(q.value.length, q.value.length); } catch (e) {} } }
+  }
+  function bdForm(r) {
+    var x = r ? bdCache.filter(function (z) { return z.r === r; })[0] : null, can = !x || canHold() || x.by === (session && session.name), v = function (k, d) { return x ? (x[k] || '') : (d || ''); };
+    function f(i, l, val, t) { return '<label class="ghq-lbl">' + l + '</label><input id="bd-' + i + '" class="ghq-input"' + (t ? ' type="' + t + '"' : '') + ' value="' + esc(val) + '">'; }
+    function ta(i, l, val) { return '<label class="ghq-lbl">' + l + '</label><textarea id="bd-' + i + '" class="ghq-input" rows="2">' + esc(val) + '</textarea>'; }
+    var now = new Date();
+    modal('<h3 class="ghq-h3">' + (x ? esc(x.id) + ' · Breakdown' : 'New Breakdown') + '</h3>' + (x ? '' : '<div class="ghq-note">Incident ID is generated automatically. Leave End date / time empty while the breakdown is open.</div>') + '<input type="hidden" id="bd-r" value="' + (x ? x.r : '') + '">' +
+      f('date', 'Date', v('date', ymdOf(now)), 'date') + f('equip', 'Equipment Name *', v('equip')) + f('tag', 'Asset Tag', v('tag')) + f('area', 'Location / Area', v('area')) +
+      ta('issue', 'Issue / Failure Description *', v('issue')) + f('cause', 'Root Cause', v('cause')) + ta('action', 'Corrective Action Taken', v('action')) + f('parts', 'Spare Parts Used', v('parts')) + f('tech', 'Technician Name', v('tech', session && session.name)) +
+      '<div class="ghq-grid2"><div>' + f('sd', 'Breakdown Start Date', v('sd', ymdOf(now)), 'date') + '</div><div>' + f('st', 'Start Time', v('st', p2(now.getHours()) + ':' + p2(now.getMinutes())), 'time') + '</div></div>' +
+      '<div class="ghq-grid2"><div>' + f('ed', 'Breakdown End Date', v('ed'), 'date') + '</div><div>' + f('et', 'End Time', v('et'), 'time') + '</div></div>' +
+      (canHold() ? f('signoff', 'Supervisor Sign-off', v('signoff', '')) : '') +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">' + (can ? 'Cancel' : 'Close') + '</button>' + (can ? '<button class="ghq-btn" id="bd-save" onclick="GHQ.bdSave()">Save</button>' : '<span></span>') + '</div>');
+  }
+  function bdSave() {
+    var g = function (k) { return (($('bd-' + k) || {}).value || '').trim(); }, e = {}, r = Number(g('r') || 0);
+    ['date', 'equip', 'tag', 'area', 'issue', 'cause', 'action', 'parts', 'tech', 'sd', 'st', 'ed', 'et', 'signoff'].forEach(function (k) { e[k] = g(k); });
+    if (!e.equip) { toast('Enter the equipment name'); return; }
+    if (!e.issue) { toast('Enter the issue / failure description'); return; }
+    if ((e.ed && !e.et) || (!e.ed && e.et)) { toast('Enter both End date and End time, or leave both empty'); return; }
+    if (e.ed && e.sd && e.st && e.et && new Date(e.ed + 'T' + e.et) < new Date(e.sd + 'T' + e.st)) { toast('End is before Start'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    var old = r ? bdCache.filter(function (z) { return z.r === r; })[0] : null, b = $('bd-save'); if (b) b.disabled = true;
+    api(r ? 'bd_update' : 'bd_add', { r: r, id: old ? old.id : '', e: e }).then(function (res) {
+      if (!res.ok) throw new Error(res.error || 'error');
+      closeModal(); toast('✔ Saved' + (res.id ? ' · ' + res.id : '')); return bdPull().then(function () { renderBd(); });
+    }).catch(function (er) { if (b) b.disabled = false; toast('Error: ' + (er && er.message || er)); });
+  }
+  function bdExcel() {
+    if (!canDownload()) { toast('Excel download is for Admin / Engineer / RIL / PM / APM'); return; }
+    var H = function (t) { return { v: t, s: 1 }; }, rows = [BD_COLS.map(function (c) { return H(c[1]); })];
+    bdCache.slice().reverse().forEach(function (x) { rows.push(BD_COLS.map(function (c) { var v = x[c[0]]; return (c[0] === 'date' || c[0] === 'sd' || c[0] === 'ed') ? (v ? fmtDate(v, v) : '') : c[0] === 'mins' ? (v === '' ? '' : Number(v)) : v; })); });
+    saveBytes('Equipment_Breakdown_Tracker_' + stamp() + '.xlsx', XLSX_MIME, XlsxLite.build([{ name: 'Equipment Breakdown Tracker', cols: [18, 12, 24, 14, 20, 40, 24, 36, 22, 18, 14, 10, 14, 10, 12, 10, 18], rows: rows, freeze: true }]));
   }
   function injectDailyLog() {
     if ($('screen-dlog')) return;
@@ -806,9 +897,10 @@
     window.openModule = function (id, tab) {
       if ((id === 'screen-users' || id === 'screen-backup') && !(session && session.role === 'admin')) { toast('Admin only'); return; }
       om(id, tab);
-      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dlog': 'Daily Log', 'screen-ptw': 'Permit to Work & LOTO', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
+      var sub = $('top-bar-sub'), titles = { 'screen-entries': 'My Entries', 'screen-dlog': 'Daily Log', 'screen-ptw': 'Permit to Work & LOTO', 'screen-bd': 'Breakdowns', 'screen-dg': 'DG & Fuel · Load Trial', 'screen-assets': 'Asset Master & QR', 'screen-reports': 'O&M Reports', 'screen-users': 'Admin · Users', 'screen-backup': 'Admin · Backup & Restore' };
       if (titles[id] && sub) sub.textContent = titles[id];
       if (id === 'screen-amc') { try { injectAmc(); } catch (e) {} pullAmcPpm(); }
+      if (id === 'screen-bd') { renderBd(); bdBusy = true; bdPull().then(function () { bdBusy = false; renderBd(); }); }
       if (id === 'screen-ptw') { renderPtw(); ptwBusy = true; ptwPull().then(function () { ptwBusy = false; renderPtw(); }); }
       if (id === 'screen-dlog') { renderDlog(); pullDtpl(); pullChecklists().then(renderDlog); }
       if (id === 'screen-ppm') renderPPM();
@@ -863,7 +955,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(bdPull).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -2602,11 +2694,11 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, ptwGo: ptwGo, ptwSwitch: ptwSwitch, ptwSearch: ptwSearch, ptwForm: ptwForm, ptwSave: ptwSave, ptwClose: ptwClose, ptwReopen: ptwReopen, ptwSet: ptwSet, lotoForm: lotoForm, lotoSave: lotoSave, ptwExcel: ptwExcel, _ptwSet: function (a, b) { ptwCache = a; lotoCache = b; renderPtw(); }, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, bdGo: bdGo, bdForm: bdForm, bdSave: bdSave, bdExcel: bdExcel, bdFilter: bdFilter, bdSearch: bdSearch, _bdSet: function (a) { bdCache = a; renderBd(); paintBdDash(); }, ptwGo: ptwGo, ptwSwitch: ptwSwitch, ptwSearch: ptwSearch, ptwForm: ptwForm, ptwSave: ptwSave, ptwClose: ptwClose, ptwReopen: ptwReopen, ptwSet: ptwSet, lotoForm: lotoForm, lotoSave: lotoSave, ptwExcel: ptwExcel, _ptwSet: function (a, b) { ptwCache = a; lotoCache = b; renderPtw(); }, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
-  injectDailyLog(); injectPtw(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
+  injectDailyLog(); injectPtw(); injectBd(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
   idbOpen().then(qAll).then(function (q) {
     queue = q;
     if (NOT_CONFIGURED) { showLogin(''); return; }
