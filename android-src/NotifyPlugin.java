@@ -8,6 +8,8 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
+import android.provider.Settings;
 import android.os.Build;
 
 import androidx.core.app.NotificationCompat;
@@ -98,6 +100,34 @@ public class NotifyPlugin extends Plugin {
         if (call.getString("seen") != null) e.putString("seen", call.getString("seen"));
         e.apply();
         schedule(getContext());
+        call.resolve();
+    }
+
+    /** {enabled: true/false} - are notifications allowed for this app right now */
+    @PluginMethod
+    public void status(PluginCall call) {
+        JSObject o = new JSObject();
+        boolean on = true;
+        try { on = androidx.core.app.NotificationManagerCompat.from(getContext()).areNotificationsEnabled(); } catch (Exception e) { }
+        o.put("enabled", on);
+        call.resolve(o);
+    }
+
+    /** Opens this app's notification settings page so the person can switch notifications on by hand. */
+    @PluginMethod
+    public void settings(PluginCall call) {
+        try {
+            Intent i = new Intent();
+            if (Build.VERSION.SDK_INT >= 26) {
+                i.setAction(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                i.putExtra(Settings.EXTRA_APP_PACKAGE, getContext().getPackageName());
+            } else {
+                i.setAction(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                i.setData(Uri.parse("package:" + getContext().getPackageName()));
+            }
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(i);
+        } catch (Exception e) { }
         call.resolve();
     }
 
