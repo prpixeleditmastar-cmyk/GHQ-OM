@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.6 · build ' + BUILD;
+  var VERSION = 'v8.7 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -404,6 +404,12 @@
   /* ===== Equipment Breakdowns ===== */
   var bdCache = LS.get('ghq_bd', []), bdQ = '', bdFilt = 'Open', bdBusy = false;
   var BD_COLS = [['id', 'Incident ID'], ['date', 'Date'], ['equip', 'Equipment Name'], ['tag', 'Asset Tag'], ['area', 'Location / Area'], ['issue', 'Issue / Failure Description'], ['cause', 'Root Cause'], ['action', 'Corrective Action Taken'], ['parts', 'Spare Parts Used'], ['tech', 'Technician Name'], ['sd', 'Breakdown Start Date'], ['st', 'Breakdown Start Time'], ['ed', 'Breakdown End Date'], ['et', 'Breakdown End Time'], ['mins', 'Downtime (Minutes)'], ['status', 'Status'], ['signoff', 'Supervisor Sign-off']];
+  function paintTicketBadge() {                        // E-Ticket Helpdesk menu badge: live number of open tickets (hidden when none)
+    var it = Array.prototype.filter.call(document.querySelectorAll('.menu-item'), function (m) { return /E-Ticket Helpdesk/i.test(m.textContent); })[0]; if (!it) return;
+    var bd = it.querySelector('.menu-badge'), n = 0;
+    try { n = (window.ticketDatabase || ticketDatabase || []).filter(function (t) { return t.status !== 'closed'; }).length; } catch (e) {}
+    if (bd) { bd.textContent = n; bd.style.display = n ? '' : 'none'; }
+  }
   function injectBd() {
     if ($('screen-bd')) return;
     var anchor = $('screen-ptw') || $('screen-dlog') || $('screen-readings'); if (!anchor) return;
@@ -2874,7 +2880,7 @@
   }
   function checkUpdate() {
     var U = window.GHQ_UPDATE_URL;
-    if (!U || !navigator.onLine || !window.GHQ_BUILD) return;
+    if (!U || !navigator.onLine || !window.GHQ_BUILD || window.GHQ_WEB) return;
     fetch(U + 'version.json?t=' + Date.now(), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (v) {
       var have = (LS.get('ghq_bundle', null) || {}).version || '0';
       if (!v || !v.version || v.version <= window.GHQ_BUILD || v.version <= have || v.version <= BUILD) return;
@@ -2892,7 +2898,7 @@
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
-  injectDailyLog(); injectPtw(); injectBd(); injectSpares(); injectMis(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
+  paintTicketBadge(); setInterval(paintTicketBadge, 15000); injectDailyLog(); injectPtw(); injectBd(); injectSpares(); injectMis(); injectAmc(); injectPhotoFields(); injectReportBox(); checkUpdate(); window.__GHQ_BOOTED = true;
   idbOpen().then(qAll).then(function (q) {
     queue = q;
     if (NOT_CONFIGURED) { showLogin(''); return; }
