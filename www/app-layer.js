@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.5 · build ' + BUILD;
+  var VERSION = 'v8.6 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -1688,7 +1688,7 @@
       else err('No internet — first login needs internet');
     }).then(function () { btn.disabled = false; });
   }
-  function forceLogout(msg) { LS.del('ghq_session'); session = null; if (timer) clearInterval(timer); showLogin(msg); }
+  function forceLogout(msg) { var NP0 = natNotify(); if (NP0) try { NP0.clear().catch(function () {}); } catch (e) {} LS.del('ghq_session'); session = null; if (timer) clearInterval(timer); showLogin(msg); }
   function logout() {
     var n = mine().length;
     if (n && !confirm(n + ' entries are not synced yet. They stay on this phone and upload at your next login. Logout anyway?')) return;
@@ -1716,6 +1716,7 @@
     ensureScreens(); injectMenus(); injectReportBox(); injectFeederBox();
     document.querySelectorAll('.btn-excel-gen[onclick*="exportTicketsToExcel"]').forEach(function (b) { b.style.display = canDownload() ? '' : 'none'; });
     rebuild(); updatePill(); injectPpmAdd();
+    var NP = natNotify(); if (NP) { try { NP.ask().catch(function () {}); } catch (e) {} notifyCfg(null); }
     openModule('screen-dashboard');
     sync();
     if (timer) clearInterval(timer);
@@ -2121,10 +2122,22 @@
         }
       });
       LS.set('ghq_cl_seen', seenN);
-      if (todo) toast('🔔 ' + todo + ' checklist' + (todo > 1 ? 's' : '') + ' waiting for your approval');
-      else if (msgs.length) toast('🔔 ' + msgs.join(', '));
+      if (todo) { toast('🔔 ' + todo + ' checklist' + (todo > 1 ? 's' : '') + ' waiting for your approval'); pushNotify('Checklist waiting for approval', todo + ' checklist' + (todo > 1 ? 's are' : ' is') + ' waiting for your approval', 101); }
+      if (msgs.length) { if (!todo) toast('🔔 ' + msgs.join(', ')); pushNotify('Your checklist', msgs.join(', '), 102); }
+      notifyCfg(seenN);
       updateBell(); rebuildPpmViews();
     }).catch(function () {});
+  }
+
+  /* ---------- tray notifications (native Android plugin "Notify"; harmless when it is not there) ---------- */
+  function natNotify() { var c = window.Capacitor; return c && c.isNativePlatform && c.isNativePlatform() && c.Plugins && c.Plugins.Notify; }
+  function pushNotify(title, body, id) { var P = natNotify(); if (P) try { P.show({ title: title, body: body, id: id || 0 }).catch(function () {}); } catch (e) {} }
+  function notifyCfg(seenN) {                         // tells the background check who is logged in, which build is installed, and what was already notified
+    var P = natNotify(); if (!P || LOCAL || !session) return;
+    var bs = [window.GHQ_BUILD, (LS.get('ghq_bundle', null) || {}).version, BUILD].filter(function (x) { return x && /^\d+$/.test(String(x)); }).map(String).sort().pop() || '';
+    var o = { api: API, name: session.name, pin: session.pin, upd: window.GHQ_UPDATE_URL || '', build: bs };
+    if (seenN) o.seen = JSON.stringify(seenN);
+    try { P.config(o).catch(function () {}); } catch (e) {}
   }
   function rebuildPpmViews() { var sc = $('screen-ppm'); if (sc && sc.classList.contains('active')) { try { renderPPM(); } catch (e) {} } }
 
@@ -2856,7 +2869,7 @@
       var have = (LS.get('ghq_bundle', null) || {}).version || '0';
       if (!v || !v.version || v.version <= window.GHQ_BUILD || v.version <= have || v.version <= BUILD) return;
       return fetch(U + 'bundle.json?t=' + Date.now(), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (b) {
-        if (b && b.html && b.version === v.version) { LS.set('ghq_bundle', b); showUpdateBanner(); }
+        if (b && b.html && b.version === v.version) { LS.set('ghq_bundle', b); showUpdateBanner(); if (LS.get('ghq_upd_notified', '') !== v.version) { LS.set('ghq_upd_notified', v.version); pushNotify('GHQ O&M update', 'A new version is ready. Open the app and tap the update bar.', 103); } }
       });
     }).catch(function () {});
   }
