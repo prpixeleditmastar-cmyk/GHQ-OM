@@ -61,6 +61,9 @@ jobs:
           MF=android/app/src/main/AndroidManifest.xml
           # camera (ticket photos) + saving files to Downloads on Android 9 and older
           sed -i 's#<application#<uses-permission android:name="android.permission.CAMERA" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />\n    <application#' "$MF"
+          # notifications: permission + background check receivers (lines tagged ghq-notify are removed again if the native code does not compile)
+          sed -i 's#<application#<uses-permission android:name="android.permission.POST_NOTIFICATIONS" /> <!-- ghq-notify -->\n    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" /> <!-- ghq-notify -->\n    <application#' "$MF"
+          sed -i 's#</application>#    <receiver android:name=".PollReceiver" android:exported="false" /> <!-- ghq-notify -->\n        <receiver android:name=".BootReceiver" android:exported="true"><intent-filter><action android:name="android.intent.action.BOOT_COMPLETED" /></intent-filter></receiver> <!-- ghq-notify -->\n    </application>#' "$MF"
 
       - name: Apply app icon and splash screen
         run: |
@@ -74,6 +77,7 @@ jobs:
           ls "$D"
           cp android-src/FileSaverPlugin.java "$D/FileSaverPlugin.java"
           cp android-src/MainActivity.java "$D/MainActivity.java"
+          cp android-src/NotifyPlugin.java android-src/PollReceiver.java android-src/BootReceiver.java "$D/"
 
       - name: Build APK
         working-directory: android
@@ -81,7 +85,8 @@ jobs:
           D=app/src/main/java/com/elev8pixel/ghqom
           ./gradlew assembleDebug || {
             echo "::warning::Native file saver did not compile - building without it (downloads will use the Share sheet)"
-            rm -f "$D/FileSaverPlugin.java"
+            rm -f "$D/FileSaverPlugin.java" "$D/NotifyPlugin.java" "$D/PollReceiver.java" "$D/BootReceiver.java"
+            sed -i '/ghq-notify/d' app/src/main/AndroidManifest.xml
             cp ../android-src/MainActivity.default.java "$D/MainActivity.java"
             ./gradlew assembleDebug
           }
