@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.7 · build ' + BUILD;
+  var VERSION = 'v8.8 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -163,6 +163,7 @@
   function rebuild() {
     resetState();
     allEvents().forEach(apply);
+    syncTicketsFromSheet();
     syncPanelSelects();
     refreshUI();
   }
@@ -280,7 +281,7 @@
     if ($('screen-ptw')) return;
     var anchor = $('screen-dlog') || $('screen-readings'); if (!anchor) return;
     anchor.insertAdjacentHTML('afterend', '<section class="screen-view" id="screen-ptw"><div class="op-screen-header"><button class="op-back-btn" onclick="openModule(\'screen-dashboard\')"><i class="fa-solid fa-arrow-left"></i> Dashboard</button><div class="op-title-area" style="text-align:right"><h2><i class="fa-solid fa-file-shield"></i> Permit to Work &amp; LOTO</h2><p>PTW register &amp; LOTO isolation points</p></div></div><div id="ptw-body"></div></section>');
-    Array.prototype.forEach.call(document.querySelectorAll('.action-pill'), function (el) { if (/PTW Permit/i.test(el.textContent)) el.setAttribute('onclick', "GHQ.ptwGo('ptw')"); });
+    Array.prototype.forEach.call(document.querySelectorAll('.action-pill'), function (el) { if (/PTW Permit/i.test(el.textContent)) el.setAttribute('onclick', "GHQ.ptwGo('ptw')"); if (/Scan QR/i.test(el.textContent)) el.setAttribute('onclick', "GHQ.astScan()"); });
     Array.prototype.forEach.call(document.querySelectorAll('.menu-item'), function (el) { if (/Permit to Work/i.test(el.textContent)) el.setAttribute('onclick', "GHQ.ptwGo('ptw')"); });
   }
   function ptwGo(tab) { ptwTab = tab || ptwTab; openModule('screen-ptw'); }
@@ -1132,7 +1133,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(bdPull).then(spPull).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(pullTickets).then(bdPull).then(spPull).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -1157,6 +1158,33 @@
       LS.set('ghq_feeders', r.feeders);
       feederRows = r.feeders.length ? r.feeders : null;
     });
+  }
+
+  /* ---------- e-Tickets follow the Tickets sheet: rows deleted / added / edited there change the app ---------- */
+  var sheetTickets = LS.get('ghq_tk_sheet', null);
+  function tkDate(at) { var d = new Date(String(at || '').replace(' ', 'T')); return isNaN(d) ? '' : d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
+  function syncTicketsFromSheet() {
+    if (LOCAL || !Array.isArray(sheetTickets)) return;
+    var pend = {}, rec = {};
+    queue.forEach(function (e) { var d = e.d || {}; if (e.type === 'ticket.create' && d.ticket) pend[d.ticket.id] = 1; else if (/^ticket\./.test(e.type)) pend[d.id] = 1; });
+    sheetTickets.forEach(function (r) { rec[r.id] = r; });
+    for (var i = ticketDatabase.length - 1; i >= 0; i--) if (!rec[ticketDatabase[i].id] && !pend[ticketDatabase[i].id]) ticketDatabase.splice(i, 1);
+    sheetTickets.forEach(function (r) {
+      if (pend[r.id]) return;
+      var t = findTicket(r.id);
+      if (!t) { t = { id: r.id, title: r.title, dept: r.dept, tag: r.tag, loc: r.loc, priority: r.priority, date: tkDate(r.at), tech: r.tech, desc: r.desc, by: r.by, holdDays: 0 }; ticketDatabase.push(t); }
+      if (r.status === 'closed') { t.status = 'closed'; if (!t.resolutionNotes) t.resolutionNotes = r.notes || 'Resolved and closed.'; if (!t.closedBy) t.closedBy = r.cby; }
+      else if (r.status === 'hold') { t.status = 'hold'; t.holdUntilDate = r.until || t.holdUntilDate; t.holdReason = r.reason || t.holdReason; t.holdStartDate = t.holdStartDate || String(r.hat || '').slice(0, 10); t._live = true; t.holdDays = holdDaysFrom(t.holdStartDate); }
+      else { t.status = 'open'; t.holdStartDate = t.holdUntilDate = t.holdReason = null; t.holdDays = 0; }
+    });
+  }
+  function pullTickets() {
+    if (LOCAL || !session || !navigator.onLine) return Promise.resolve();
+    return api('ticket_list', {}).then(function (r) {
+      if (!r || !r.ok || !Array.isArray(r.list)) return;
+      var sig = JSON.stringify(r.list), old = JSON.stringify(sheetTickets); sheetTickets = r.list; LS.set('ghq_tk_sheet', r.list);
+      if (sig !== old) rebuild();
+    }).catch(function () {});
   }
   function pullAll() {
     return api('pull', { since: lastSeq }).then(function (r) {
