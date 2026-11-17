@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.9 · build ' + BUILD;
+  var VERSION = 'v8.10 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -952,6 +952,8 @@
     }
     var ab = $('amc-add-btn'); if (ab) ab.style.display = canHold() ? '' : 'none';
     var xl = $('amc-xl'); if (xl) xl.style.display = canDownload() ? 'flex' : 'none';
+    Array.prototype.forEach.call(document.querySelectorAll('#tab-amc-dashboard .section-title span, #screen-amc .section-title span'), function (sp) { if (/Live Status Breakdown/i.test(sp.textContent)) sp.textContent = 'Live Status'; });
+    try { amcApply(); } catch (e) {}
     // contract master = DLP / AMC / Third Party Inspection tracker
     Array.prototype.forEach.call(document.querySelectorAll('#tab-amc-master button'), function (bt) {
       if (/openNewAMCModal/.test(bt.getAttribute('onclick') || '')) { bt.setAttribute('onclick', 'GHQ.ctNew()'); bt.innerHTML = '<i class="fa-solid fa-plus"></i> New DLP / AMC'; }
