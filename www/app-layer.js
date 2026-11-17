@@ -6,7 +6,7 @@
   var API = (CFG.API_URL && !/PASTE/.test(CFG.API_URL)) ? CFG.API_URL : '';
   var LOCAL = !API;
   var BUILD = window.__GHQ_CACHED || window.GHQ_BUILD || 'dev';
-  var VERSION = 'v8.8 · build ' + BUILD;
+  var VERSION = 'v8.9 · build ' + BUILD;
   var NOT_CONFIGURED = LOCAL && !CFG.LOCAL_TEST;       // release app without a server URL must NOT silently run offline
 
   /* ---------- tiny helpers ---------- */
@@ -772,7 +772,7 @@
     commit('daily.log', d).then(function () { try { LS.del('ghq_dl_' + d.dkey); } catch (e) {} closeModal(); toast('✔ Submitted — sent to Supervisor for approval'); renderDlog(); });
   }
   /* ================= AMC & Vendor PPM ================= */
-  var AMC_CATS = ['HVAC', 'Electrical', 'Elevator', 'Water'], AMC_ICON = { HVAC: ['fa-snowflake', '#38bdf8'], Electrical: ['fa-bolt', '#eab308'], Elevator: ['fa-elevator', '#a855f7'], Water: ['fa-faucet-drip', '#34d399'] };
+  var AMC_CATS = ['HVAC', 'Electrical', 'Elevator', 'Water', 'Other'], AMC_ICON = { Other: ['fa-screwdriver-wrench', '#94a3b8'], HVAC: ['fa-snowflake', '#38bdf8'], Electrical: ['fa-bolt', '#eab308'], Elevator: ['fa-elevator', '#a855f7'], Water: ['fa-faucet-drip', '#34d399'] };
   function amcMap(x) {
     return { id: x.id, cat: x.cat, vendor: x.vendor, equip: x.equip, tag: x.tag || '—', freq: x.freq, lastPPM: x.last ? fmtDate(x.last, '') : '—', nextPPM: fmtDate(x.next, ''), daysRemaining: x.days, status: x.status,
       opwo: x.opwo || '', file: x.file || '', reportAvail: !!x.file, checklistAvail: true, _last: x.last || '', _next: x.next };
@@ -872,6 +872,77 @@
       saveBytes('AMC_PPM_' + m + '.xlsx', XLSX_MIME, XlsxLite.build([{ name: 'AMC PPM ' + m, cols: [5, 12, 22, 34, 16, 16, 12, 13, 13, 10, 40, 24, 14], rows: rows, freeze: true }, { name: 'Summary', cols: [16, 10, 18], rows: sum, freeze: true }]));
     }).catch(function (e) { toast('Error: ' + (e && e.message || e)); });
   }
+
+  /* ===== DLP / AMC / Third Party Inspection tracker (sheets: DLP, AMC Contracts, Third Party Inspection) ===== */
+  var ctData = LS.get('ghq_ct', { dlp: [], amc: [], tpi: [] }), ctType = 'all', CT_NAME = { dlp: 'DLP', amc: 'AMC', tpi: 'Third Party Inspection' };
+  function pullContracts() {
+    if (LOCAL || !session || !navigator.onLine) return Promise.resolve();
+    return api('contract_list', {}).then(function (r) {
+      if (!r || !r.ok) return; ctData = { dlp: r.dlp || [], amc: r.amc || [], tpi: r.tpi || [] }; LS.set('ghq_ct', ctData);
+      try { renderAMCDashboard(); renderAMCMaster(); } catch (e) {}
+    }).catch(function () {});
+  }
+  function ctAll() { var o = []; ['dlp', 'amc', 'tpi'].forEach(function (t) { ctData[t].forEach(function (x) { o.push(Object.assign({ type: t }, x)); }); }); return o; }
+  function ctColor(st) { return st === 'EXPIRED' ? '#f87171' : /^DUE/.test(st) ? '#fbbf24' : '#34d399'; }
+  function ctPaintDash() {
+    var A = ctAll(), set = function (id, v) { var e = $(id); if (e) e.textContent = v; };
+    set('amc-active-count', ctData.amc.filter(function (x) { return x.status === 'ACTIVE'; }).length);
+    set('amc-expiring-count', A.filter(function (x) { return /^DUE/.test(x.status); }).length);
+    var vs = {}; A.forEach(function (x) { if (x.vendor) vs[x.vendor.toLowerCase()] = 1; }); set('amc-vendor-count', Object.keys(vs).length);
+    var b = document.querySelector('.amc-overview-banner');
+    if (b) b.innerHTML = '<div class="banner-left"><span class="banner-title"><i class="fa-solid fa-boxes-stacked" style="color:var(--gold-primary)"></i> Total</span><span class="banner-sub">Contracts and inspections tracked</span></div><div class="banner-right" style="display:flex;gap:14px">' +
+      [['dlp', 'DLP'], ['amc', 'AMC'], ['tpi', 'Third party inspection']].map(function (p) { return '<div style="text-align:center"><div class="banner-badge-num" style="font-size:1.3rem">' + ctData[p[0]].length + '</div><div style="font-size:.6rem;color:var(--text-muted)">' + p[1] + '</div></div>'; }).join('') + '<span id="amc-total-equipment" style="display:none"></span></div>';
+  }
+  function ctRenderMaster() {
+    var box = $('amc-master-container'); if (!box) return;
+    var q = (($('amc-search-input') || {}).value || '').toLowerCase().trim(), A = ctAll().filter(function (x) { return (ctType === 'all' || x.type === ctType) && (!q || (x.scope + ' ' + x.vendor + ' ' + x.doc + ' ' + x.resp).toLowerCase().indexOf(q) >= 0); });
+    A.sort(function (a, b) { return (a.days === '' ? 1e9 : a.days) - (b.days === '' ? 1e9 : b.days); });
+    var bd = $('amc-master-badge'); if (bd) bd.textContent = A.length + ' entries';
+    var chips = '<div style="display:flex;gap:6px;flex-wrap:wrap">' + [['all', 'All'], ['dlp', 'DLP'], ['amc', 'AMC'], ['tpi', 'Third Party Inspection']].map(function (c) { return '<button class="' + (ctType === c[0] ? 'btn-gold-solid' : 'btn-gold-outline') + '" style="padding:5px 12px;font-size:.74rem" onclick="GHQ.ctFilter(\'' + c[0] + '\')">' + c[1] + '</button>'; }).join('') + '</div>';
+    box.innerHTML = chips + (A.length ? A.map(function (x) {
+      var c = ctColor(x.status), row = function (l, v) { return v ? '<span><b>' + l + ':</b> ' + esc(v) + '</span>' : ''; };
+      return '<div class="amc-master-card"><div class="amc-card-top"><span class="asset-tag-badge">' + CT_NAME[x.type] + '</span><span style="font-size:.72rem;font-weight:700;color:' + c + '">' + esc(x.status || '—') + (x.days !== '' ? ' · ' + (x.days < 0 ? Math.abs(x.days) + ' days ago' : x.days + ' days') : '') + '</span></div>' +
+        '<div class="amc-vendor-name">' + esc(x.scope) + '</div><div class="amc-spec-grid">' + row('Vendor', x.vendor) + row('Start', x.start ? fmtDate(x.start, x.start) : '') + row(x.type === 'tpi' ? 'Expires' : 'End', x.end ? fmtDate(x.end, x.end) : '') + row('Months', x.months) + row('Responsible', x.resp) + row('Doc / Cert no.', x.doc) + row('Phone', x.phone) + row('Email', x.email) + row('Remarks', x.rem) + '</div>' +
+        '<div class="amc-contact-row"><span></span><button class="btn-gold-outline" style="padding:4px 10px;font-size:.7rem" onclick="GHQ.ctForm(\'' + x.type + '\',' + x.r + ')">Edit / Renew</button></div></div>';
+    }).join('') : '<div class="ghq-note">No entries.</div>');
+  }
+  function ctFilter(t) { ctType = t; ctRenderMaster(); }
+  function ctNew() {
+    modal('<h3 class="ghq-h3">New entry — select type</h3><div style="display:flex;flex-direction:column;gap:8px"><button class="ghq-btn" onclick="GHQ.ctForm(\'dlp\')">DLP (Defect Liability Period)</button><button class="ghq-btn" onclick="GHQ.ctForm(\'amc\')">AMC (Annual Maintenance Contract)</button><button class="ghq-btn" onclick="GHQ.ctForm(\'tpi\')">Third Party Inspection</button><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button></div>');
+  }
+  function ctForm(t, r) {
+    var x = r ? ctData[t].filter(function (z) { return z.r === r; })[0] : null, v = function (k) { return x ? (x[k] || '') : ''; }, tp = t === 'tpi';
+    function f(i, l, val, ty) { return '<label class="ghq-lbl">' + l + '</label><input id="ct-' + i + '" class="ghq-input"' + (ty ? ' type="' + ty + '"' : '') + ' value="' + esc(val) + '">'; }
+    var can = !x || canHold() || x.by === (session && session.name);
+    modal('<h3 class="ghq-h3">' + (x ? 'Edit' : 'New') + ' ' + CT_NAME[t] + '</h3><input type="hidden" id="ct-t" value="' + t + '"><input type="hidden" id="ct-r" value="' + (r || '') + '">' +
+      (tp ? f('scope', 'Equipment Name *', v('scope')) : f('scope', 'Scope of Work *', v('scope'))) + f('vendor', 'Vendor Name', v('vendor')) +
+      (tp ? '' : '<div class="ghq-grid2"><div>' + f('phone', 'Phone No.', v('phone'), 'tel') + '</div><div>' + f('email', 'Email ID', v('email'), 'email') + '</div></div>') +
+      '<div class="ghq-grid2"><div>' + f('start', 'Start Date', v('start'), 'date') + '</div><div>' + f('end', (tp ? 'Expire Date' : 'End Date') + ' *', v('end'), 'date') + '</div></div>' +
+      f('resp', 'Responsible Person', v('resp')) + f('doc', 'Document / Certificate No.', v('doc')) + f('rem', 'Remarks', v('rem')) +
+      '<div class="ghq-note">Total months, days remaining and status are calculated automatically from the dates. To renew, change the dates.</div>' +
+      '<div class="ghq-grid2" style="margin-top:8px"><button class="ghq-btn ghost" onclick="GHQ.closeModal()">Cancel</button>' + (can ? '<button class="ghq-btn" id="ct-save" onclick="GHQ.ctSave()">Save</button>' : '<span></span>') + '</div>');
+  }
+  function ctSave() {
+    var g = function (k) { return (($('ct-' + k) || {}).value || '').trim(); }, t = g('t'), r = Number(g('r') || 0), e = {};
+    ['scope', 'vendor', 'phone', 'email', 'start', 'end', 'resp', 'doc', 'rem'].forEach(function (k) { e[k] = g(k); });
+    if (!e.scope) { toast(t === 'tpi' ? 'Enter the equipment name' : 'Enter the scope of work'); return; }
+    if (!e.end) { toast('Enter the end / expire date'); return; }
+    if (!navigator.onLine) { toast('Internet required'); return; }
+    var b = $('ct-save'); if (b) b.disabled = true;
+    api(r ? 'contract_update' : 'contract_add', { type: t, r: r, e: e }).then(function (res) {
+      if (!res.ok) throw new Error(res.error || 'error'); closeModal(); toast('✔ Saved'); return pullContracts();
+    }).catch(function (er) { if (b) b.disabled = false; toast('Error: ' + (er && er.message || er)); });
+  }
+  function ctExcel() {
+    if (!canDownload()) { toast('Excel download is for Admin / Engineer / RIL / PM / APM'); return; }
+    var H = function (t) { return { v: t, s: 1 }; }, sheets = [];
+    [['dlp', 'DLP'], ['amc', 'AMC'], ['tpi', 'Third Party Inspection']].forEach(function (p) {
+      var t = p[0], tp = t === 'tpi', hd = ['Sr.No', tp ? 'Equipment Name' : 'SCOPE OF WORK', 'Vendor Name'].concat(tp ? [] : ['PHONE NO.', 'EMAIL ID']).concat(['Start Date', tp ? 'Expire Date' : 'End Date', 'Total Months', 'Days Remaining', 'Status', 'Responsible Person', 'Document / Certificate No.', 'Remarks']), rows = [hd.map(H)];
+      ctData[t].slice().sort(function (a, b) { return a.r - b.r; }).forEach(function (x, i) { rows.push([i + 1, x.scope, x.vendor].concat(tp ? [] : [x.phone, x.email]).concat([x.start ? fmtDate(x.start, x.start) : '', x.end ? fmtDate(x.end, x.end) : '', x.months === '' ? '' : Number(x.months), x.days, x.status, x.resp, x.doc, x.rem])); });
+      sheets.push({ name: p[1], cols: tp ? [6, 40, 30, 14, 14, 10, 10, 16, 18, 24, 24] : [6, 44, 34, 14, 30, 14, 14, 10, 10, 16, 18, 24, 24], rows: rows, freeze: true });
+    });
+    saveBytes('DLP_AMC_Third_Party_Inspection_' + stamp() + '.xlsx', XLSX_MIME, XlsxLite.build(sheets));
+  }
   function injectAmc() {
     // Dashboard names
     var panel = $('tab-amc-ppm');
@@ -881,6 +952,12 @@
     }
     var ab = $('amc-add-btn'); if (ab) ab.style.display = canHold() ? '' : 'none';
     var xl = $('amc-xl'); if (xl) xl.style.display = canDownload() ? 'flex' : 'none';
+    // contract master = DLP / AMC / Third Party Inspection tracker
+    Array.prototype.forEach.call(document.querySelectorAll('#tab-amc-master button'), function (bt) {
+      if (/openNewAMCModal/.test(bt.getAttribute('onclick') || '')) { bt.setAttribute('onclick', 'GHQ.ctNew()'); bt.innerHTML = '<i class="fa-solid fa-plus"></i> New DLP / AMC'; }
+      if (/openRenewAMCModal/.test(bt.getAttribute('onclick') || '')) { if (canDownload()) { bt.setAttribute('onclick', 'GHQ.ctExcel()'); bt.innerHTML = '<i class="fa-solid fa-file-excel"></i> Excel'; bt.style.background = ''; } else bt.style.display = 'none'; }
+    });
+    var si = $('amc-search-input'); if (si) { si.setAttribute('placeholder', 'Search scope, vendor, document no…'); si.setAttribute('oninput', 'GHQ.ctRender()'); }
     // New AMC: Op/WO no.
     var sc = $('new-amc-scope');
     if (sc && !$('new-amc-opwo')) sc.parentNode.insertAdjacentHTML('beforebegin', '<div><label style="font-size:0.72rem; color:var(--text-muted); font-weight:600; display:block; margin-bottom:2px;">Op/WO No.</label><input type="text" id="new-amc-opwo" placeholder="Type the order no." class="cal-select" style="width:100%; font-size:0.82rem; padding:8px 10px;"></div>');
@@ -890,12 +967,13 @@
   (function wrapAmc() {
     var rm = window.renderAMCMaster;
     window.renderAMCMaster = function (items) {
-      rm(items);
+      ctRenderMaster(); return;
       try {
         var list = items || amcMasterDatabase, box = $('amc-master-container');
         if (box) Array.prototype.forEach.call(box.children, function (card, i) { var a = list[i]; if (a && a.opwo) card.insertAdjacentHTML('beforeend', '<div class="op-item-desc" style="padding:4px 12px 8px">Op/WO no.: <b>' + esc(a.opwo) + '</b></div>'); });
       } catch (e) {}
     };
+    var rdb = window.renderAMCDashboard; window.renderAMCDashboard = function () { rdb(); try { ctPaintDash(); } catch (e) {} };
     var rp = window.renderPPMSchedules;
     window.renderPPMSchedules = function () {
       rp();
@@ -1133,7 +1211,7 @@
   function sync() {
     if (LOCAL || !session || syncing || !navigator.onLine) { updatePill(); return Promise.resolve(); }
     syncing = true; updatePill();
-    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(pullTickets).then(bdPull).then(spPull).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
+    return pushAll().then(pullFeeders).then(pullPpm).then(pullShifts).then(pullChecklists).then(pullDtpl).then(pullAmcPpm).then(pullContracts).then(pullTickets).then(bdPull).then(spPull).then(pullDg).then(pullRep).then(pullAssets).then(pullReports).then(pullAll).then(function () { lastErr = ''; lastSyncAt = Date.now(); })
       .catch(function (e) { lastErr = String(e && e.message || e); })
       .then(function () { syncing = false; updatePill(); });
   }
@@ -2922,7 +3000,7 @@
   window.GHQ = {
     saveReading: saveReading, login: login, logout: logout, syncNow: function () { lastErr = ''; sync().then(function () { toast(lastErr ? 'Sync error: ' + lastErr : feedersInfo.err ? 'Feeders list not loaded: ' + feedersInfo.err : '✔ Synced' + (feedersInfo.n ? ' · ' + feedersInfo.n + ' feeders' : '')); var b = $('bk-status'); if (b) renderBackup(); }); },
     monthlyReport: monthlyReport, addFeeders: addFeeders, checkServer: checkServer, renderEntries: renderEntries, saveUser: saveUser, editUser: editUser, removeUser: removeUser,
-    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, notifSetup: notifSetup, spSet: spSet, spItemForm: spItemForm, spItemSave: spItemSave, spTxnForm: spTxnForm, spTxnSave: spTxnSave, spExcel: spExcel, misSet: misSet, misExcel: misExcel, _spSet: function (a, b) { spItems = a; spLog = b || []; renderSp(); }, _misMonth: function (m) { misMonth = m; renderMis(); }, bdGo: bdGo, bdForm: bdForm, bdSave: bdSave, bdExcel: bdExcel, bdFilter: bdFilter, bdSearch: bdSearch, _bdSet: function (a) { bdCache = a; renderBd(); paintBdDash(); }, ptwGo: ptwGo, ptwSwitch: ptwSwitch, ptwSearch: ptwSearch, ptwForm: ptwForm, ptwSave: ptwSave, ptwClose: ptwClose, ptwReopen: ptwReopen, ptwSet: ptwSet, lotoForm: lotoForm, lotoSave: lotoSave, ptwExcel: ptwExcel, _ptwSet: function (a, b) { ptwCache = a; lotoCache = b; renderPtw(); }, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
+    roMonth: roMonth, roPick: roPick, roTogglePdf: roTogglePdf, roTemplate: roTemplate, roUpload: roUpload, roUploadPdf: roUploadPdf, _parseRoster: parseRoster, _parseCsv: parseCsv, _clShow: clShow, _lastEvent: function () { return events[events.length - 1] || queue[queue.length - 1] || null; }, clSet: clSet, clAllOk: clAllOk, clSubmit: clSubmit, clView: clView, _ppmTest: function (rows, evs, items) { ppmRows = rows; ppmLog = {}; ppmLogId = {}; evs.forEach(apply); clItems = items; var out = {}; rows.forEach(function (e) { var ev = ppmEval(e); out[e.name] = { dates: ev.dates, wait: ev.wait, last: lastDone(e), next: ymdOf(nextDue(e)) }; }); return out; }, _astTest: function (items) { assets = { cats: ['Electrical', 'HVAC', 'Plumbing', 'Other'], items: items, canEdit: true }; renderAssets(); }, astScan: astScan, astImport: astImport, astFind: astFind, astForm: astForm, astSave: astSave, astShow: astShow, astOpen: astOpen, astSearch: astSearch, astLabel: astLabel, astLabels: astLabels, _repTest: function (t, st, en, cells, edit) { repExtra = {}; repCtx = { no: 'TEST', type: t, start: st, end: en, status: 'Pending Engineer', can: true, edit: !!edit, cells: cells }; rform(); }, repGen: repGen, repOpen: repOpen, repClose: repClose, repSave: repSave, repAct: repAct, repAddRow: repAddRow, repDl: repDl, repRegen: repRegen, dgStart: dgStart, dgStartSubmit: dgStartSubmit, dgOpen: dgOpen, dgSet: dgSet, dgSubmit: dgSubmit, dgAct: dgAct, _dgCalc: dgCalc, clAct: clAct, clEdit: clEdit, notifSetup: notifSetup, ctNew: ctNew, ctForm: ctForm, ctSave: ctSave, ctFilter: ctFilter, ctRender: ctRenderMaster, ctExcel: ctExcel, _ctSet: function (d) { ctData = d; renderAMCDashboard(); renderAMCMaster(); }, spSet: spSet, spItemForm: spItemForm, spItemSave: spItemSave, spTxnForm: spTxnForm, spTxnSave: spTxnSave, spExcel: spExcel, misSet: misSet, misExcel: misExcel, _spSet: function (a, b) { spItems = a; spLog = b || []; renderSp(); }, _misMonth: function (m) { misMonth = m; renderMis(); }, bdGo: bdGo, bdForm: bdForm, bdSave: bdSave, bdExcel: bdExcel, bdFilter: bdFilter, bdSearch: bdSearch, _bdSet: function (a) { bdCache = a; renderBd(); paintBdDash(); }, ptwGo: ptwGo, ptwSwitch: ptwSwitch, ptwSearch: ptwSearch, ptwForm: ptwForm, ptwSave: ptwSave, ptwClose: ptwClose, ptwReopen: ptwReopen, ptwSet: ptwSet, lotoForm: lotoForm, lotoSave: lotoSave, ptwExcel: ptwExcel, _ptwSet: function (a, b) { ptwCache = a; lotoCache = b; renderPtw(); }, amcPick: amcPick, amcUpload: amcUpload, amcAddForm: amcAddForm, amcAddSave: amcAddSave, amcExcel: amcExcel, _amcSet: function (l) { amcPpmCache = l; amcApply(); }, dlOpen: dlOpen, dlDraft: dlDraft, dlSubmit: dlSubmit, _dlSet: function (t) { dailyTpl = t; renderDlog(); }, mwForm: mwForm, mwSave: mwSave, mwDone: mwDone, mwDoneSave: mwDoneSave, mwExcel: mwExcel, mwExcelAll: mwExcelAll, _ops: renderOps, _ghqCards: renderGhqCards, ppmPdf: ppmPdf, ppmAdd: ppmAdd, ppmAddSubmit: ppmAddSubmit, ppmOpen: ppmOpen, ppmDone: ppmDone, closeModal: closeModal, backupNow: backupNow, downloadJSON: downloadJSON, downloadReadings: downloadReadings, restore: restore,
     _buildSheets: buildPanelSheets, _monthTasks: monthTasks, _state: function () { return { session: session, queue: queue.length, events: events.length }; }
   };
 
